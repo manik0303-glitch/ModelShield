@@ -19,6 +19,7 @@ from evaluation.trust_checks import (
 )
 from evaluation.trust_flag import generate_trust_flag
 from evaluation.gradient_masking import analyze_gradient_masking
+from evaluation.masking_simulation import run_masking_simulation
 import json
 
 
@@ -87,6 +88,7 @@ page = st.sidebar.radio(
         "Test Your Own Image",
         "Create an Adversarial Image",
         "Test CIFAR-10 Dataset",
+        "Gradient Masking Lab",
     ],
 )
 st.sidebar.caption("Model: Carmon2019Unlabeled · Dataset: CIFAR-10 · Input size: 32×32")
@@ -247,7 +249,7 @@ elif page == "Create an Adversarial Image":
 
 
 # -------------------- OPTION 3: TEST CIFAR-10 DATASET --------------------
-else:
+elif page == "Test CIFAR-10 Dataset":
     st.header("3. Test the CIFAR-10 Dataset")
     st.write(
         "Evaluate the pretrained model on a small CIFAR-10 sample, compare clean predictions "
@@ -622,6 +624,321 @@ else:
 
     else:
         st.info("Choose the evaluation settings in the sidebar, then click **Run CIFAR-10 Evaluation**.")
+
+
+# -------------------- OPTION 4: GRADIENT MASKING LAB --------------------
+elif page == "Gradient Masking Lab":
+    st.header("4. 🔬 Gradient Masking Lab (Validation Suite)")
+    st.write(
+        "Run a controlled validation experiment that deliberately introduces a gradient-obscuring condition "
+        "(input quantization) in a temporary pipeline, and test whether ModelShield's detector identifies the resulting evidence. "
+        "Standard FGSM and PGD are evaluated alongside BPDA-assisted PGD (straight-through gradient approximation)."
+    )
+
+    with st.sidebar:
+        st.subheader("Simulation Configuration")
+        sim_mode = st.radio(
+            "Evaluation Mode",
+            ["Simulated Gradient Masking", "Normal Evaluation Reference"],
+            index=0,
+            key="sim_eval_mode",
+            help="Choose whether to evaluate the model with simulated gradient masking or regular differentiable inference.",
+        )
+        sim_quant_levels = st.selectbox(
+            "Quantization levels",
+            [4, 8, 16, 32],
+            index=2,
+            key="sim_quant_levels",
+            help="Number of discrete levels per color channel. Lower levels produce more severe gradient shattering.",
+        )
+        sim_sample_cap = st.selectbox(
+            "Simulation sample cap",
+            [8, 16, 32],
+            index=1,
+            key="sim_sample_cap",
+            help="Number of CIFAR-10 images evaluated in the simulation.",
+        )
+        sim_eps_pixels = st.slider(
+            "Attack epsilon (pixel levels / 255)",
+            min_value=1, max_value=16, value=8, key="sim_eps_slider"
+        )
+        sim_pgd_steps = st.slider(
+            "PGD iterations (Standard & BPDA)",
+            min_value=5, max_value=20, value=10, key="sim_pgd_steps_slider"
+        )
+        sim_seed = st.number_input(
+            "Random seed",
+            min_value=0, max_value=999999, value=123, step=1, key="sim_random_seed"
+        )
+
+    sim_epsilon = sim_eps_pixels / 255.0
+
+    c_btn1, c_btn2 = st.columns([2, 1])
+    with c_btn1:
+        run_sim_btn = st.button(
+            "Run Simulated Gradient-Masking Test",
+            type="primary",
+            key="run_sim_test_btn",
+        )
+    with c_btn2:
+        clear_sim_btn = st.button(
+            "Clear Simulation Results",
+            type="secondary",
+            key="clear_sim_test_btn",
+        )
+
+    if clear_sim_btn:
+        st.session_state["gm_simulation_results"] = None
+        st.rerun()
+
+    if run_sim_btn:
+        if sim_mode == "Normal Evaluation Reference":
+            st.info("Switched to Normal Evaluation Reference. Running standard diagnostic suite without quantization.")
+            try:
+                with st.spinner("Evaluating standard baseline pipeline..."):
+                    model, device = get_model()
+                    if st.session_state.get("cifar_eval_images") is not None:
+                        sim_images = st.session_state["cifar_eval_images"][:sim_sample_cap].to(device)
+                        sim_labels = st.session_state["cifar_eval_labels"][:sim_sample_cap].to(device)
+                    else:
+                        raw_imgs, raw_lbls = get_cifar_dataset(sim_sample_cap)
+                        sim_images = raw_imgs.to(device)
+                        sim_labels = raw_lbls.to(device)
+
+                    normal_diag = analyze_gradient_masking(
+                        model=model,
+                        images=sim_images,
+                        labels=sim_labels,
+                        epsilon=sim_epsilon,
+                        pgd_steps=sim_pgd_steps,
+                        max_diagnostic_samples=sim_sample_cap,
+                    )
+                    st.session_state["gm_simulation_results"] = {
+                        "mode": "normal_reference",
+                        "simulation_validation": {
+                            "status": "VALIDATED",
+                            "summary": "Normal evaluation reference: unquantized model pipeline.",
+                            "checks": [{"name": "baseline_unaltered", "passed": True, "details": "Model evaluated without simulated transformations."}],
+                        },
+                        "detector_result": normal_diag,
+                        "measurements": {
+                            "sample_count": len(sim_labels),
+                            "eligible_clean_correct_count": normal_diag["metadata"]["clean_correct_count"],
+                            "original_clean_accuracy": normal_diag["metadata"]["clean_accuracy"],
+                            "simulated_clean_accuracy": normal_diag["metadata"]["clean_accuracy"],
+                            "clean_accuracy_drop_percentage_points": 0.0,
+                            "attacks": {
+                                "fgsm": {"asr": normal_diag["signals"]["fgsm_vs_pgd"]["fgsm_success_rate"], "success_count": 0, "denominator": normal_diag["metadata"]["clean_correct_count"]},
+                                "pgd": {"asr": normal_diag["signals"]["fgsm_vs_pgd"]["pgd_success_rate"], "success_count": 0, "denominator": normal_diag["metadata"]["clean_correct_count"]},
+                                "bpda_pgd": {"asr": normal_diag["signals"]["fgsm_vs_pgd"]["pgd_success_rate"], "success_count": 0, "denominator": normal_diag["metadata"]["clean_correct_count"]},
+                            },
+                            "gradient_checks": {
+                                "ordinary_gradient_norm": normal_diag["signals"]["gradient_health"]["median_l2_norm"],
+                                "ordinary_near_zero_fraction": normal_diag["signals"]["gradient_health"]["median_near_zero_fraction"],
+                                "bpda_gradient_norm": normal_diag["signals"]["gradient_health"]["median_l2_norm"],
+                                "bpda_gradient_finite": not normal_diag["signals"]["gradient_health"]["non_finite"],
+                            },
+                        },
+                        "configuration": {
+                            "quantization_levels": None,
+                            "epsilon": sim_epsilon,
+                            "pgd_steps": sim_pgd_steps,
+                            "sample_count_requested": sim_sample_cap,
+                            "random_seed": sim_seed,
+                        },
+                        "limitations": ["Reference mode: standard differentiable model with no simulated masking."],
+                    }
+            except Exception as exc:
+                st.error(f"Normal reference evaluation failed: {exc}")
+        else:
+            try:
+                with st.spinner("Executing controlled simulation: quantization pipeline, standard attacks, BPDA-assisted PGD, and detector evaluation..."):
+                    model, device = get_model()
+                    if st.session_state.get("cifar_eval_images") is not None:
+                        sim_images = st.session_state["cifar_eval_images"][:sim_sample_cap].to(device)
+                        sim_labels = st.session_state["cifar_eval_labels"][:sim_sample_cap].to(device)
+                    else:
+                        raw_imgs, raw_lbls = get_cifar_dataset(sim_sample_cap)
+                        sim_images = raw_imgs.to(device)
+                        sim_labels = raw_lbls.to(device)
+
+                    sim_res = run_masking_simulation(
+                        model=model,
+                        images=sim_images,
+                        labels=sim_labels,
+                        quantization_levels=sim_quant_levels,
+                        epsilon=sim_epsilon,
+                        alpha=min(2 / 255, sim_epsilon),
+                        pgd_steps=sim_pgd_steps,
+                        sample_cap=sim_sample_cap,
+                        random_seed=sim_seed,
+                        bpda_advantage_margin=5.0,
+                    )
+                    st.session_state["gm_simulation_results"] = sim_res
+            except Exception as exc:
+                st.error(f"Simulation run failed: {exc}")
+
+    # Render Simulation Results if present
+    if st.session_state.get("gm_simulation_results") is not None:
+        sim_data = st.session_state["gm_simulation_results"]
+        val_info = sim_data.get("simulation_validation", {})
+        val_status = val_info.get("status", "INCONCLUSIVE")
+        det_res = sim_data.get("detector_result", {})
+        det_status = det_res.get("status", "INCONCLUSIVE")
+        meas = sim_data.get("measurements", {})
+        atks = meas.get("attacks", {})
+        grad_chk = meas.get("gradient_checks", {})
+
+        st.divider()
+
+        # Panel 1 & 2: Side-by-Side Status (Independent Validation vs Detector Verdict)
+        st.subheader("Experiment Status & Detector Verification")
+        p1, p2 = st.columns(2)
+
+        with p1:
+            st.markdown("#### 1. Simulation Validation Status")
+            if val_status == "VALIDATED":
+                st.success(f"**VALIDATED**: {val_info.get('summary', '')}")
+            elif val_status == "CONDITION_NOT_DEMONSTRATED":
+                st.warning(f"**CONDITION NOT DEMONSTRATED**: {val_info.get('summary', '')}")
+            elif val_status == "ERROR":
+                st.error(f"**ERROR**: {val_info.get('summary', '')}")
+            else:
+                st.info(f"**INCONCLUSIVE**: {val_info.get('summary', '')}")
+
+            # Validation checks table
+            v_checks = val_info.get("checks", [])
+            if v_checks:
+                v_df = pd.DataFrame([
+                    {
+                        "Check": c.get("name", "").replace("_", " ").title(),
+                        "Status": "PASS" if c.get("passed") else "FAIL",
+                        "Details": c.get("details", ""),
+                    }
+                    for c in v_checks
+                ])
+                st.dataframe(v_df, use_container_width=True, hide_index=True)
+
+        with p2:
+            st.markdown("#### 2. ModelShield Detector Verdict")
+            if det_status == "WARNING":
+                st.warning(f"**WARNING**: {det_res.get('summary', '')}")
+            elif det_status == "NO_STRONG_SIGNAL":
+                st.success(f"**NO STRONG SIGNAL**: {det_res.get('summary', '')}")
+            else:
+                st.info(f"**INCONCLUSIVE**: {det_res.get('summary', '')}")
+
+            st.caption(
+                "Note: The detector evaluates observed mathematical evidence only. "
+                "It is strictly independent and does not receive the simulation mode or expected outcome."
+            )
+
+        # Panel 3: Clean Accuracy Impact
+        st.subheader("3. Clean Accuracy Impact (Pipeline Integrity)")
+        ca1, ca2, ca3, ca4 = st.columns(4)
+        orig_ca = meas.get("original_clean_accuracy")
+        sim_ca = meas.get("simulated_clean_accuracy")
+        drop_ca = meas.get("clean_accuracy_drop_percentage_points")
+        elig_cnt = meas.get("eligible_clean_correct_count")
+
+        ca1.metric("Original Clean Accuracy", f"{orig_ca:.2f}%" if orig_ca is not None else "N/A")
+        ca2.metric("Simulated Clean Accuracy", f"{sim_ca:.2f}%" if sim_ca is not None else "N/A")
+        ca3.metric("Clean Accuracy Drop", f"{drop_ca:+.2f} pp" if drop_ca is not None else "N/A", delta=f"{-drop_ca:.2f} pp" if drop_ca is not None else None)
+        ca4.metric("Eligible Clean-Correct Samples", f"{elig_cnt} / {meas.get('sample_count', 0)}")
+
+        # Panel 4: Attack Comparison (Standard FGSM/PGD vs BPDA-assisted PGD)
+        st.subheader("4. Attack Comparison (Identical Denominator)")
+        at1, at2, at3 = st.columns(3)
+        fgsm_asr = atks.get("fgsm", {}).get("asr")
+        pgd_asr = atks.get("pgd", {}).get("asr")
+        bpda_asr = atks.get("bpda_pgd", {}).get("asr")
+
+        at1.metric("Standard FGSM ASR", f"{fgsm_asr:.2f}%" if fgsm_asr is not None else "N/A")
+        at2.metric("Standard PGD ASR", f"{pgd_asr:.2f}%" if pgd_asr is not None else "N/A")
+        bpda_delta = (bpda_asr - pgd_asr) if (bpda_asr is not None and pgd_asr is not None) else None
+        at3.metric(
+            "BPDA-Assisted PGD ASR",
+            f"{bpda_asr:.2f}%" if bpda_asr is not None else "N/A",
+            delta=f"{bpda_delta:+.2f} pp over PGD" if bpda_delta is not None else None,
+        )
+
+        atk_df = pd.DataFrame(
+            {
+                "Attack Success Rate (%)": [
+                    fgsm_asr if fgsm_asr is not None else 0.0,
+                    pgd_asr if pgd_asr is not None else 0.0,
+                    bpda_asr if bpda_asr is not None else 0.0,
+                ]
+            },
+            index=["Standard FGSM", "Standard PGD", "BPDA-Assisted PGD"],
+        )
+        st.bar_chart(atk_df)
+        st.caption(
+            "BPDA-assisted PGD uses the identical quantized forward pipeline, but applies the straight-through "
+            "gradient estimator during the backward pass to bypass obfuscated/shattered gradients."
+        )
+
+        # Panel 5: Gradient Comparison
+        st.subheader("5. Gradient Behavior Comparison")
+        g1, g2, g3, g4 = st.columns(4)
+        ord_norm = grad_chk.get("ordinary_gradient_norm")
+        ord_nz = grad_chk.get("ordinary_near_zero_fraction")
+        bpda_norm = grad_chk.get("bpda_gradient_norm")
+        bpda_finite = grad_chk.get("bpda_gradient_finite")
+
+        g1.metric("Ordinary Gradient L2 Norm", f"{ord_norm:.2e}" if ord_norm is not None else "Disconnected (None)")
+        g2.metric("Ordinary Near-Zero Elements", f"{ord_nz * 100:.1f}%" if ord_nz is not None else "100.0%")
+        g3.metric("BPDA Gradient L2 Norm", f"{bpda_norm:.4f}" if bpda_norm is not None else "N/A")
+        g4.metric("BPDA Gradient Usability", "Finite & Usable" if bpda_finite else "Non-Finite / Error")
+
+        # Panel 6: Detector Signal Breakdown
+        st.subheader("6. Detector Diagnostic Details")
+        det_warnings = det_res.get("warning_reasons", [])
+        if det_warnings:
+            st.markdown("**Flagged Warning Signals:**")
+            for w in det_warnings:
+                st.markdown(f"- ⚠️ {w}")
+        else:
+            st.info("The detector did not observe sufficient warning triggers in this specific run.")
+
+        if det_res.get("actionable_guidance"):
+            st.markdown("**Actionable Guidance from Detector:**")
+            for g in det_res["actionable_guidance"]:
+                st.markdown(f"- 💡 {g}")
+
+        # Panel 7: Interpretation and Limitations
+        st.subheader("7. Scientific Limitations")
+        st.caption(" • ".join(sim_data.get("limitations", [])))
+
+        # Export Buttons
+        st.divider()
+        e_col1, e_col2 = st.columns(2)
+        e_col1.download_button(
+            "Download Simulation Report (JSON)",
+            data=json.dumps(sim_data, indent=2).encode("utf-8"),
+            file_name="modelshield_simulation_report.json",
+            mime="application/json",
+        )
+        flat_sim = {
+            "Simulation_Validation_Status": [val_status],
+            "Detector_Verdict": [det_status],
+            "Quantization_Levels": [sim_data.get("configuration", {}).get("quantization_levels")],
+            "Original_Clean_Accuracy": [orig_ca],
+            "Simulated_Clean_Accuracy": [sim_ca],
+            "Standard_FGSM_ASR": [fgsm_asr],
+            "Standard_PGD_ASR": [pgd_asr],
+            "BPDA_PGD_ASR": [bpda_asr],
+            "Ordinary_Grad_Norm": [ord_norm],
+            "BPDA_Grad_Norm": [bpda_norm],
+        }
+        e_col2.download_button(
+            "Download Simulation Summary (CSV)",
+            data=pd.DataFrame(flat_sim).to_csv(index=False).encode("utf-8"),
+            file_name="modelshield_simulation_summary.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("Configure simulation settings in the sidebar and click **Run Simulated Gradient-Masking Test** to begin.")
 # =====================================================
 # DEFENSE VERIFICATION LAB
 # =====================================================

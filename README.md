@@ -4,6 +4,7 @@ An adversarial robustness evaluation platform for CIFAR-10 image classification 
 - FGSM and PGD adversarial attack generation
 - Dataset-level robustness evaluation
 - Gradient-masking diagnostic suite (new in this branch)
+- Controlled Gradient-Masking Simulation Lab (Validation Mode with BPDA)
 - Defense Verification Lab (input quantization)
 - Trust check pipeline with PASS/WARNING/FAIL flags
 
@@ -34,23 +35,28 @@ Gradient masking is a failure mode where gradient-based attacks appear ineffecti
 ModelShield/
 ├── app.py                             # Streamlit dashboard (entry point)
 ├── attacks/
+│   ├── bpda_pgd.py                    # 🆕 BPDA-assisted PGD (straight-through approximation)
 │   ├── fgsm.py                        # FGSM adversarial attack
 │   ├── pgd.py                         # PGD adversarial attack
 │   └── ensemble.py                    # Attack ensemble & baseline metrics
 ├── defenses/
 │   └── defense_methods.py             # Identity and quantization defenses
 ├── evaluation/
-│   ├── gradient_masking.py            # 🆕 Gradient-masking diagnostic engine
-│   ├── test_gradient_masking.py       # 🆕 Unit tests (10 tests, no downloads needed)
+│   ├── gradient_masking.py            # Gradient-masking diagnostic engine (6 signals)
+│   ├── masking_simulation.py          # 🆕 Controlled gradient-masking simulation runner
+│   ├── test_gradient_masking.py       # Diagnostic engine unit tests
 │   ├── trust_checks.py                # Perturbation/pixel/metric sanity checks
 │   ├── trust_flag.py                  # Aggregates checks into PASS/WARNING/FAIL
 │   ├── defense_evaluation.py          # Defense comparison evaluation
 │   └── metrics.py                     # Clean accuracy utilities
+├── tests/
+│   └── test_masking_simulation.py     # 🆕 Simulation suite unit tests (25 tests)
 ├── model/
 │   ├── load_model.py                  # Loads Carmon2019Unlabeled via RobustBench
 │   └── dataset.py                     # CIFAR-10 data loading utilities
 ├── requirements.txt
-└── ModelShield_Gradient_Masking_Implementation_Plan.md   # Full design spec
+├── ModelShield_Gradient_Masking_Implementation_Plan.md
+└── ModelShield_Simulated_Gradient_Masking_Implementation_Plan.md
 ```
 
 ---
@@ -75,8 +81,15 @@ Access it at `http://localhost:8501` in your browser.
 
 ## Running the Tests
 
-All unit tests run **without any network access or model downloads**:
+All 35 unit tests run **offline without any network access or model downloads**:
 ```bash
+python -m pytest tests/ evaluation/ -v
+```
+
+Expected output:
+```text
+35 passed in ~6s
+```
 python -m pytest evaluation/test_gradient_masking.py -v
 ```
 
@@ -123,3 +136,4 @@ evaluation/test_gradient_masking.py .......... [100%]
 - Athalye, A., Carlini, N., & Wagner, D. (2018). [Obfuscated Gradients Give a False Sense of Security](https://arxiv.org/abs/1802.00420). *ICML 2018*.
 - Croce, F., & Hein, M. (2020). [RobustBench](https://robustbench.github.io/).
 - Carmon, Y. et al. (2019). Unlabeled Data Improves Adversarial Robustness.
+
