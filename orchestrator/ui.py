@@ -286,7 +286,7 @@ def plot_confidence_distribution(sample: Dict[str, Any], show_mode: str = "PGD")
         clean_probs.append(clean_map.get(c, 0.0))
         adv_probs.append(adv_map.get(c, 0.0))
 
-    sample_id = sample_dict.get("sample_id", 1)
+    sample_id = sample.get("sample_id", 1)
     fig = go.Figure()
     fig.add_trace(go.Bar(
         y=classes,
