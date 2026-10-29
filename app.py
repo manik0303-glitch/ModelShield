@@ -21,6 +21,8 @@ from evaluation.trust_flag import generate_trust_flag
 from evaluation.gradient_masking import analyze_gradient_masking
 from evaluation.masking_simulation import run_masking_simulation
 import json
+import plotly.graph_objects as go
+import plotly.express as px
 
 
 # -------------------- PAGE CONFIG --------------------
@@ -29,6 +31,148 @@ st.set_page_config(
     page_icon="🛡️",
     layout="wide",
 )
+
+# -------------------- CYBER-SECURITY UI STYLING --------------------
+st.markdown("""
+<style>
+/* Global Card Base */
+.ms-card {
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 1.25rem;
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.35);
+    margin-bottom: 1rem;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.ms-card:hover {
+    border-color: rgba(99, 102, 241, 0.3);
+}
+
+/* Status Hero Banners */
+.ms-hero-validated {
+    background: linear-gradient(135deg, rgba(6, 78, 59, 0.4) 0%, rgba(15, 23, 42, 0.85) 100%);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    border-left: 5px solid #10B981;
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+}
+.ms-hero-warning {
+    background: linear-gradient(135deg, rgba(120, 53, 15, 0.4) 0%, rgba(15, 23, 42, 0.85) 100%);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-left: 5px solid #F59E0B;
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+}
+.ms-hero-info {
+    background: linear-gradient(135deg, rgba(30, 58, 138, 0.4) 0%, rgba(15, 23, 42, 0.85) 100%);
+    border: 1px solid rgba(59, 130, 246, 0.4);
+    border-left: 5px solid #3B82F6;
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+}
+
+/* Metric Pill */
+.ms-metric-box {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    text-align: left;
+}
+.ms-metric-label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94A3B8;
+    margin-bottom: 0.25rem;
+}
+.ms-metric-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #F8FAFC;
+    line-height: 1.2;
+}
+.ms-metric-sub {
+    font-size: 0.75rem;
+    color: #64748B;
+    margin-top: 0.25rem;
+}
+
+/* Styled HTML Table */
+.ms-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(15, 23, 42, 0.6);
+    margin-top: 0.5rem;
+}
+.ms-table th {
+    background: rgba(30, 41, 59, 0.85);
+    color: #CBD5E1;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    text-align: left;
+}
+.ms-table td {
+    padding: 0.75rem 1rem;
+    font-size: 0.88rem;
+    color: #E2E8F0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.ms-table tr:last-child td {
+    border-bottom: none;
+}
+.ms-table tr:hover td {
+    background: rgba(51, 65, 85, 0.3);
+}
+
+/* Status Badges */
+.badge-pass {
+    display: inline-flex;
+    align-items: center;
+    background: rgba(16, 185, 129, 0.15);
+    color: #34D399;
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    padding: 0.2rem 0.55rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.badge-fail {
+    display: inline-flex;
+    align-items: center;
+    background: rgba(239, 68, 68, 0.15);
+    color: #F87171;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    padding: 0.2rem 0.55rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.badge-warning {
+    display: inline-flex;
+    align-items: center;
+    background: rgba(245, 158, 11, 0.15);
+    color: #FBBF24;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    padding: 0.2rem 0.55rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+</style>
+""", unsafe_allow_html=True)
 
 CLASS_NAMES = [
     "airplane", "automobile", "bird", "cat", "deer",
@@ -798,42 +942,82 @@ elif page == "Gradient Masking Lab":
         with p1:
             st.markdown("#### 1. Simulation Validation Status")
             if val_status == "VALIDATED":
-                st.success(f"**VALIDATED**: {val_info.get('summary', '')}")
+                st.markdown(f"""
+                <div class="ms-hero-validated">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #34D399; font-weight: 700;">
+                        ✔ Simulation Validated
+                    </div>
+                    <div style="font-size: 1.05rem; font-weight: 600; color: #F8FAFC; margin-top: 0.25rem;">
+                        {val_info.get('summary', '')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             elif val_status == "CONDITION_NOT_DEMONSTRATED":
-                st.warning(f"**CONDITION NOT DEMONSTRATED**: {val_info.get('summary', '')}")
+                st.markdown(f"""
+                <div class="ms-hero-warning">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #FBBF24; font-weight: 700;">
+                        ⚠ Condition Not Demonstrated
+                    </div>
+                    <div style="font-size: 1.05rem; font-weight: 600; color: #F8FAFC; margin-top: 0.25rem;">
+                        {val_info.get('summary', '')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             elif val_status == "ERROR":
                 st.error(f"**ERROR**: {val_info.get('summary', '')}")
             else:
                 st.info(f"**INCONCLUSIVE**: {val_info.get('summary', '')}")
 
-            # Validation checks table
+            # Validation checks table - rendered cleanly via Streamlit native table or unindented HTML
             v_checks = val_info.get("checks", [])
             if v_checks:
-                v_df = pd.DataFrame([
-                    {
-                        "Check": c.get("name", "").replace("_", " ").title(),
-                        "Status": "PASS" if c.get("passed") else "FAIL",
-                        "Details": c.get("details", ""),
-                    }
-                    for c in v_checks
-                ])
-                st.dataframe(v_df, use_container_width=True, hide_index=True)
+                table_rows = []
+                for c in v_checks:
+                    c_name = c.get("name", "").replace("_", " ").title()
+                    c_pass = c.get("passed", False)
+                    badge = "✔ PASS" if c_pass else "✘ FAIL"
+                    details = c.get("details", "")
+                    table_rows.append({
+                        "Check": c_name,
+                        "Status": badge,
+                        "Diagnostic Evidence": details
+                    })
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
         with p2:
             st.markdown("#### 2. ModelShield Detector Verdict")
             if det_status == "WARNING":
-                st.warning(f"**WARNING**: {det_res.get('summary', '')}")
+                st.markdown(f"""
+                <div class="ms-hero-warning">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #FBBF24; font-weight: 700;">
+                        ⚠ Warning: Masking Detected
+                    </div>
+                    <div style="font-size: 1.05rem; font-weight: 600; color: #F8FAFC; margin-top: 0.25rem;">
+                        {det_res.get('summary', '')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             elif det_status == "NO_STRONG_SIGNAL":
-                st.success(f"**NO STRONG SIGNAL**: {det_res.get('summary', '')}")
+                st.markdown(f"""
+                <div class="ms-hero-validated">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #34D399; font-weight: 700;">
+                        ✔ No Strong Signal
+                    </div>
+                    <div style="font-size: 1.05rem; font-weight: 600; color: #F8FAFC; margin-top: 0.25rem;">
+                        {det_res.get('summary', '')}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             else:
                 st.info(f"**INCONCLUSIVE**: {det_res.get('summary', '')}")
 
             st.caption(
-                "Note: The detector evaluates observed mathematical evidence only. "
-                "It is strictly independent and does not receive the simulation mode or expected outcome."
+                "🛡️ **Detector Independence Guarantee:** The detector evaluates observed mathematical evidence only. "
+                "It is strictly decoupled and does not receive the simulation mode or expected outcome."
             )
 
         # Panel 3: Clean Accuracy Impact
+        st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.subheader("3. Clean Accuracy Impact (Pipeline Integrity)")
         ca1, ca2, ca3, ca4 = st.columns(4)
         orig_ca = meas.get("original_clean_accuracy")
@@ -841,44 +1025,128 @@ elif page == "Gradient Masking Lab":
         drop_ca = meas.get("clean_accuracy_drop_percentage_points")
         elig_cnt = meas.get("eligible_clean_correct_count")
 
-        ca1.metric("Original Clean Accuracy", f"{orig_ca:.2f}%" if orig_ca is not None else "N/A")
-        ca2.metric("Simulated Clean Accuracy", f"{sim_ca:.2f}%" if sim_ca is not None else "N/A")
-        ca3.metric("Clean Accuracy Drop", f"{drop_ca:+.2f} pp" if drop_ca is not None else "N/A", delta=f"{-drop_ca:.2f} pp" if drop_ca is not None else None)
-        ca4.metric("Eligible Clean-Correct Samples", f"{elig_cnt} / {meas.get('sample_count', 0)}")
+        with ca1:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Original Accuracy</div>
+                <div class="ms-metric-val">{orig_ca:.2f}%</div>
+                <div class="ms-metric-sub">Unaltered PyTorch model</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with ca2:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Quantized Accuracy</div>
+                <div class="ms-metric-val">{sim_ca:.2f}%</div>
+                <div class="ms-metric-sub">Pipeline with hard rounding</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with ca3:
+            drop_color = "#34D399" if (drop_ca is not None and abs(drop_ca) < 5.0) else "#F87171"
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Clean Accuracy Drop</div>
+                <div class="ms-metric-val" style="color: {drop_color};">{drop_ca:+.2f} pp</div>
+                <div class="ms-metric-sub">Delta on eligible samples</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with ca4:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Eligible Denominator</div>
+                <div class="ms-metric-val">{elig_cnt} <span style="font-size: 0.95rem; font-weight: normal; color: #94A3B8;">/ {meas.get('sample_count', 0)}</span></div>
+                <div class="ms-metric-sub">Clean-correct base samples</div>
+            </div>
+            """, unsafe_allow_html=True)
 
         # Panel 4: Attack Comparison (Standard FGSM/PGD vs BPDA-assisted PGD)
+        st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.subheader("4. Attack Comparison (Identical Denominator)")
-        at1, at2, at3 = st.columns(3)
         fgsm_asr = atks.get("fgsm", {}).get("asr")
         pgd_asr = atks.get("pgd", {}).get("asr")
         bpda_asr = atks.get("bpda_pgd", {}).get("asr")
+        bpda_delta = (bpda_asr - pgd_asr) if (bpda_asr is not None and pgd_asr is not None) else 0.0
 
-        at1.metric("Standard FGSM ASR", f"{fgsm_asr:.2f}%" if fgsm_asr is not None else "N/A")
-        at2.metric("Standard PGD ASR", f"{pgd_asr:.2f}%" if pgd_asr is not None else "N/A")
-        bpda_delta = (bpda_asr - pgd_asr) if (bpda_asr is not None and pgd_asr is not None) else None
-        at3.metric(
-            "BPDA-Assisted PGD ASR",
-            f"{bpda_asr:.2f}%" if bpda_asr is not None else "N/A",
-            delta=f"{bpda_delta:+.2f} pp over PGD" if bpda_delta is not None else None,
+        at1, at2, at3 = st.columns(3)
+        with at1:
+            st.markdown(f"""
+            <div class="ms-metric-box" style="border-top: 3px solid #6366F1;">
+                <div class="ms-metric-label">Standard FGSM</div>
+                <div class="ms-metric-val">{fgsm_asr:.2f}%</div>
+                <div class="ms-metric-sub">One-step gradient (blinded by quant)</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with at2:
+            st.markdown(f"""
+            <div class="ms-metric-box" style="border-top: 3px solid #F43F5E;">
+                <div class="ms-metric-label">Standard PGD</div>
+                <div class="ms-metric-val">{pgd_asr:.2f}%</div>
+                <div class="ms-metric-sub">Iterative descent (shattered gradients)</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with at3:
+            st.markdown(f"""
+            <div class="ms-metric-box" style="border-top: 3px solid #A855F7;">
+                <div class="ms-metric-label">BPDA-Assisted PGD</div>
+                <div class="ms-metric-val" style="color: #C084FC;">{bpda_asr:.2f}%</div>
+                <div class="ms-metric-sub" style="color: #34D399; font-weight: 600;">+{bpda_delta:.2f} pp breakthrough advantage</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Plotly Annotated Bar Chart
+        categories = ["Standard FGSM", "Standard PGD", "BPDA-Assisted PGD"]
+        asr_values = [
+            fgsm_asr if fgsm_asr is not None else 0.0,
+            pgd_asr if pgd_asr is not None else 0.0,
+            bpda_asr if bpda_asr is not None else 0.0,
+        ]
+        bar_colors = ["#6366F1", "#F43F5E", "#A855F7"]
+
+        fig_atk = go.Figure(data=[
+            go.Bar(
+                x=categories,
+                y=asr_values,
+                text=[f"{v:.2f}%" for v in asr_values],
+                textposition='outside',
+                textfont=dict(size=14, color="#F8FAFC", family="sans-serif"),
+                marker=dict(
+                    color=bar_colors,
+                    line=dict(color='rgba(255, 255, 255, 0.15)', width=1.5),
+                    cornerradius=8
+                ),
+                width=0.45
+            )
+        ])
+
+        fig_atk.update_layout(
+            title=dict(
+                text="<b>Attack Success Rate (ASR) Comparison</b> — Proving Gradient Masking",
+                font=dict(size=16, color="#F1F5F9")
+            ),
+            plot_bgcolor='rgba(15, 23, 42, 0.6)',
+            paper_bgcolor='rgba(0, 0, 0, 0)',
+            yaxis=dict(
+                title="Attack Success Rate (%)",
+                range=[0, max(max(asr_values) * 1.25, 25.0)],
+                gridcolor='rgba(255, 255, 255, 0.08)',
+                color="#94A3B8"
+            ),
+            xaxis=dict(
+                color="#F1F5F9",
+                tickfont=dict(size=13, family="sans-serif")
+            ),
+            margin=dict(l=40, r=40, t=50, b=40),
+            height=340
         )
 
-        atk_df = pd.DataFrame(
-            {
-                "Attack Success Rate (%)": [
-                    fgsm_asr if fgsm_asr is not None else 0.0,
-                    pgd_asr if pgd_asr is not None else 0.0,
-                    bpda_asr if bpda_asr is not None else 0.0,
-                ]
-            },
-            index=["Standard FGSM", "Standard PGD", "BPDA-Assisted PGD"],
-        )
-        st.bar_chart(atk_df)
+        st.plotly_chart(fig_atk, use_container_width=True)
         st.caption(
-            "BPDA-assisted PGD uses the identical quantized forward pipeline, but applies the straight-through "
-            "gradient estimator during the backward pass to bypass obfuscated/shattered gradients."
+            "💡 **Interpretation:** Standard PGD is ineffective because hard rounding creates zero gradients almost everywhere. "
+            "BPDA-assisted PGD uses the identical forward quantization, but applies a straight-through gradient approximation in the backward pass to expose the model's true vulnerability."
         )
 
         # Panel 5: Gradient Comparison
+        st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.subheader("5. Gradient Behavior Comparison")
         g1, g2, g3, g4 = st.columns(4)
         ord_norm = grad_chk.get("ordinary_gradient_norm")
@@ -886,16 +1154,45 @@ elif page == "Gradient Masking Lab":
         bpda_norm = grad_chk.get("bpda_gradient_norm")
         bpda_finite = grad_chk.get("bpda_gradient_finite")
 
-        g1.metric("Ordinary Gradient L2 Norm", f"{ord_norm:.2e}" if ord_norm is not None else "Disconnected (None)")
-        g2.metric("Ordinary Near-Zero Elements", f"{ord_nz * 100:.1f}%" if ord_nz is not None else "100.0%")
-        g3.metric("BPDA Gradient L2 Norm", f"{bpda_norm:.4f}" if bpda_norm is not None else "N/A")
-        g4.metric("BPDA Gradient Usability", "Finite & Usable" if bpda_finite else "Non-Finite / Error")
+        with g1:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Ordinary Gradient L2 Norm</div>
+                <div class="ms-metric-val" style="color: #F87171;">{f"{ord_norm:.2e}" if ord_norm is not None else "0.00 (None)"}</div>
+                <div class="ms-metric-sub">Vanished / Disconnected</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g2:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">Near-Zero Element Fraction</div>
+                <div class="ms-metric-val">{f"{ord_nz * 100:.1f}%" if ord_nz is not None else "100.0%"}</div>
+                <div class="ms-metric-sub">Shattered gradient indicator</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g3:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">BPDA Gradient L2 Norm</div>
+                <div class="ms-metric-val" style="color: #34D399;">{f"{bpda_norm:.4f}" if bpda_norm is not None else "N/A"}</div>
+                <div class="ms-metric-sub">Healthy non-zero magnitude</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with g4:
+            st.markdown(f"""
+            <div class="ms-metric-box">
+                <div class="ms-metric-label">BPDA Usability</div>
+                <div class="ms-metric-val" style="color: #A855F7;">{"Finite & Usable" if bpda_finite else "Error"}</div>
+                <div class="ms-metric-sub">Straight-through backward pass</div>
+            </div>
+            """, unsafe_allow_html=True)
 
         # Panel 6: Detector Signal Breakdown
+        st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.subheader("6. Detector Diagnostic Details")
         det_warnings = det_res.get("warning_reasons", [])
         if det_warnings:
-            st.markdown("**Flagged Warning Signals:**")
+            st.markdown("**Identified Warning Reasons:**")
             for w in det_warnings:
                 st.markdown(f"- ⚠️ {w}")
         else:
@@ -907,6 +1204,7 @@ elif page == "Gradient Masking Lab":
                 st.markdown(f"- 💡 {g}")
 
         # Panel 7: Interpretation and Limitations
+        st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.subheader("7. Scientific Limitations")
         st.caption(" • ".join(sim_data.get("limitations", [])))
 
