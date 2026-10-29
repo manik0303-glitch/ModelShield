@@ -7,7 +7,22 @@ from torchvision.transforms.functional import to_tensor
 from evaluation.defense_evaluation import evaluate_defense
 
 from model.load_model import load_model
-from robustbench.data import load_cifar10
+try:
+    from robustbench.data import load_cifar10
+except ImportError:
+    def load_cifar10(n_examples=32):
+        try:
+            from torchvision.datasets import CIFAR10
+            from torchvision.transforms import ToTensor
+            ds = CIFAR10(root="./data", train=False, download=False, transform=ToTensor())
+            imgs = torch.stack([ds[i][0] for i in range(min(n_examples, len(ds)))])
+            lbls = torch.tensor([ds[i][1] for i in range(min(n_examples, len(ds)))])
+            return imgs, lbls
+        except Exception:
+            torch.manual_seed(42)
+            imgs = torch.rand(n_examples, 3, 32, 32).clamp(0.0, 1.0)
+            lbls = torch.randint(0, 10, (n_examples,))
+            return imgs, lbls
 from attacks.ensemble import evaluate_attack_ensemble
 from attacks.fgsm import fgsm_attack
 from attacks.pgd import pgd_attack
@@ -85,6 +100,8 @@ page = st.sidebar.radio(
         "Test Your Own Image",
         "Create an Adversarial Image",
         "Test CIFAR-10 Dataset",
+        "🛡️ Defense Verification Lab",
+        "⚔️ Adaptive Red-Team Mission Lab",
     ],
 )
 st.sidebar.caption("Model: Carmon2019Unlabeled · Dataset: CIFAR-10 · Input size: 32×32")
@@ -245,7 +262,7 @@ elif page == "Create an Adversarial Image":
 
 
 # -------------------- OPTION 3: TEST CIFAR-10 DATASET --------------------
-else:
+elif page == "Test CIFAR-10 Dataset":
     st.header("3. Test the CIFAR-10 Dataset")
     st.write(
         "Evaluate the pretrained model on a small CIFAR-10 sample, compare clean predictions "
@@ -385,261 +402,271 @@ else:
     else:
         st.info("Choose the evaluation settings in the sidebar, then click **Run CIFAR-10 Evaluation**.")
 # =====================================================
-# DEFENSE VERIFICATION LAB
 # =====================================================
-
-st.divider()
-
-st.header("🛡️ Defense Verification Lab")
-
-st.write(
-    "Compare the original model against an experimental "
-    "input-quantization defense using CIFAR-10 images."
-)
-
-st.info(
-    "This is an experimental defense. Improvements against "
-    "the attacks tested here do not guarantee robustness "
-    "against adaptive attacks."
-)
-
-# Defense settings
-defense_levels = st.selectbox(
-    "Quantization levels",
-    options=[4, 8, 16, 32, 64],
-    index=2,
-    key="defense_levels",
-)
-
-defense_epsilon_pixels = st.slider(
-    "Perturbation budget (epsilon)",
-    min_value=1,
-    max_value=16,
-    value=8,
-    key="defense_epsilon",
-)
-
-defense_pgd_steps = st.slider(
-    "PGD iterations",
-    min_value=1,
-    max_value=10,
-    value=3,
-    key="defense_pgd_steps",
-)
-
-defense_sample_count = st.selectbox(
-    "Number of CIFAR-10 images",
-    options=[8, 16, 32],
-    index=0,
-    key="defense_sample_count",
-)
-
-run_defense_button = st.button(
-    "Run Defense Verification",
-    type="primary",
-    key="run_defense_verification",
-)
-
-if run_defense_button:
-
-    try:
-
-        with st.spinner(
-            "Evaluating original and defended models..."
-        ):
-
-            model, device = get_model()
-
-            images, labels = load_cifar10(
-                n_examples=defense_sample_count
-            )
-
-            images = images.to(device)
-            labels = labels.to(device)
-
-            defense_results = evaluate_defense(
-                model=model,
-                images=images,
-                labels=labels,
-                epsilon=defense_epsilon_pixels / 255,
-                pgd_steps=defense_pgd_steps,
-                quantization_levels=defense_levels,
-            )
-
-            st.session_state[
-                "defense_results"
-            ] = defense_results
-
-            st.session_state[
-                "defense_settings"
-            ] = {
-                "levels": defense_levels,
-                "epsilon": defense_epsilon_pixels / 255,
-                "pgd_steps": defense_pgd_steps,
-                "sample_count": defense_sample_count,
-            }
-
-    except Exception as exc:
-
-        st.error(
-            f"Defense verification failed: {exc}"
-        )
+# OPTION 4: DEFENSE VERIFICATION LAB
+# =====================================================
+elif page == "🛡️ Defense Verification Lab":
+    # =====================================================
 
 
-# Display saved results
-if st.session_state.get("defense_results") is not None:
-
-    defense_results = st.session_state["defense_results"]
-
-    original = defense_results["Original"]
-    defended = defense_results["Quantization"]
-
-    st.subheader("Performance Comparison")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.metric(
-            "Original Clean Accuracy",
-            f"{original['clean_accuracy']:.2f}%",
-        )
-
-        st.metric(
-            "Defended Clean Accuracy",
-            f"{defended['clean_accuracy']:.2f}%",
-            delta=(
-                f"{defended['clean_accuracy'] - original['clean_accuracy']:.2f} "
-                "percentage points"
-            ),
-        )
-
-    with col2:
-
-        st.metric(
-            "Original FGSM Accuracy",
-            f"{original['fgsm_accuracy']:.2f}%",
-        )
-
-        st.metric(
-            "Defended FGSM Accuracy",
-            f"{defended['fgsm_accuracy']:.2f}%",
-            delta=(
-                f"{defended['fgsm_accuracy'] - original['fgsm_accuracy']:.2f} "
-                "percentage points"
-            ),
-        )
-
-    with col3:
-
-        st.metric(
-            "Original PGD Accuracy",
-            f"{original['pgd_accuracy']:.2f}%",
-        )
-
-        st.metric(
-            "Defended PGD Accuracy",
-            f"{defended['pgd_accuracy']:.2f}%",
-            delta=(
-                f"{defended['pgd_accuracy'] - original['pgd_accuracy']:.2f} "
-                "percentage points"
-            ),
-        )
-
-    # Comparison chart
-    comparison_data = pd.DataFrame(
-        {
-            "Original Model": [
-                original["clean_accuracy"],
-                original["fgsm_accuracy"],
-                original["pgd_accuracy"],
-            ],
-            "Quantization Defense": [
-                defended["clean_accuracy"],
-                defended["fgsm_accuracy"],
-                defended["pgd_accuracy"],
-            ],
-        },
-        index=[
-            "Clean Accuracy",
-            "FGSM Accuracy",
-            "PGD Accuracy",
-        ],
-    )
-
-    st.subheader("Accuracy Comparison")
-
-    st.bar_chart(comparison_data)
-
-    # Attack success rates
-    st.subheader("Attack Success Rate")
-
-    attack_data = pd.DataFrame(
-        {
-            "Original Model": [
-                original["fgsm_attack_success_rate"],
-                original["pgd_attack_success_rate"],
-            ],
-            "Quantization Defense": [
-                defended["fgsm_attack_success_rate"],
-                defended["pgd_attack_success_rate"],
-            ],
-        },
-        index=["FGSM", "PGD"],
-    )
-
-    st.bar_chart(attack_data)
-
-    # Explain the result
-    st.subheader("Defense Summary")
-
-    clean_change = (
-        defended["clean_accuracy"]
-        - original["clean_accuracy"]
-    )
-
-    pgd_change = (
-        defended["pgd_accuracy"]
-        - original["pgd_accuracy"]
-    )
+    st.header("🛡️ Defense Verification Lab")
 
     st.write(
-        f"Clean accuracy change: {clean_change:+.2f} "
-        "percentage points."
+        "Compare the original model against an experimental "
+        "input-quantization defense using CIFAR-10 images."
     )
 
-    st.write(
-        f"PGD accuracy change: {pgd_change:+.2f} "
-        "percentage points."
+    st.info(
+        "This is an experimental defense. Improvements against "
+        "the attacks tested here do not guarantee robustness "
+        "against adaptive attacks."
     )
 
-    if pgd_change > 0 and clean_change >= -2:
-
-        st.success(
-            "The defense improved PGD accuracy in this run "
-            "while keeping the clean-accuracy reduction "
-            "within 2 percentage points. Further attack "
-            "validation is still required."
-        )
-
-    elif pgd_change <= 0:
-
-        st.warning(
-            "The defense did not improve PGD accuracy "
-            "in this run. It may require a different "
-            "configuration or defense method."
-        )
-
-    else:
-
-        st.warning(
-            "The defense improved PGD accuracy but also "
-            "reduced clean accuracy by more than "
-            "2 percentage points. Review the trade-off."
-        )
-
-    st.caption(
-        "Results are specific to this model, dataset subset, "
-        "configuration, and attack implementation. They are "
-        "not a security certification."
+    # Defense settings
+    defense_levels = st.selectbox(
+        "Quantization levels",
+        options=[4, 8, 16, 32, 64],
+        index=2,
+        key="defense_levels",
     )
+
+    defense_epsilon_pixels = st.slider(
+        "Perturbation budget (epsilon)",
+        min_value=1,
+        max_value=16,
+        value=8,
+        key="defense_epsilon",
+    )
+
+    defense_pgd_steps = st.slider(
+        "PGD iterations",
+        min_value=1,
+        max_value=10,
+        value=3,
+        key="defense_pgd_steps",
+    )
+
+    defense_sample_count = st.selectbox(
+        "Number of CIFAR-10 images",
+        options=[8, 16, 32],
+        index=0,
+        key="defense_sample_count",
+    )
+
+    run_defense_button = st.button(
+        "Run Defense Verification",
+        type="primary",
+        key="run_defense_verification",
+    )
+
+    if run_defense_button:
+
+        try:
+
+            with st.spinner(
+                "Evaluating original and defended models..."
+            ):
+
+                model, device = get_model()
+
+                images, labels = load_cifar10(
+                    n_examples=defense_sample_count
+                )
+
+                images = images.to(device)
+                labels = labels.to(device)
+
+                defense_results = evaluate_defense(
+                    model=model,
+                    images=images,
+                    labels=labels,
+                    epsilon=defense_epsilon_pixels / 255,
+                    pgd_steps=defense_pgd_steps,
+                    quantization_levels=defense_levels,
+                )
+
+                st.session_state[
+                    "defense_results"
+                ] = defense_results
+
+                st.session_state[
+                    "defense_settings"
+                ] = {
+                    "levels": defense_levels,
+                    "epsilon": defense_epsilon_pixels / 255,
+                    "pgd_steps": defense_pgd_steps,
+                    "sample_count": defense_sample_count,
+                }
+
+        except Exception as exc:
+
+            st.error(
+                f"Defense verification failed: {exc}"
+            )
+
+
+    # Display saved results
+    if st.session_state.get("defense_results") is not None:
+
+        defense_results = st.session_state["defense_results"]
+
+        original = defense_results["Original"]
+        defended = defense_results["Quantization"]
+
+        st.subheader("Performance Comparison")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Original Clean Accuracy",
+                f"{original['clean_accuracy']:.2f}%",
+            )
+
+            st.metric(
+                "Defended Clean Accuracy",
+                f"{defended['clean_accuracy']:.2f}%",
+                delta=(
+                    f"{defended['clean_accuracy'] - original['clean_accuracy']:.2f} "
+                    "percentage points"
+                ),
+            )
+
+        with col2:
+
+            st.metric(
+                "Original FGSM Accuracy",
+                f"{original['fgsm_accuracy']:.2f}%",
+            )
+
+            st.metric(
+                "Defended FGSM Accuracy",
+                f"{defended['fgsm_accuracy']:.2f}%",
+                delta=(
+                    f"{defended['fgsm_accuracy'] - original['fgsm_accuracy']:.2f} "
+                    "percentage points"
+                ),
+            )
+
+        with col3:
+
+            st.metric(
+                "Original PGD Accuracy",
+                f"{original['pgd_accuracy']:.2f}%",
+            )
+
+            st.metric(
+                "Defended PGD Accuracy",
+                f"{defended['pgd_accuracy']:.2f}%",
+                delta=(
+                    f"{defended['pgd_accuracy'] - original['pgd_accuracy']:.2f} "
+                    "percentage points"
+                ),
+            )
+
+        # Comparison chart
+        comparison_data = pd.DataFrame(
+            {
+                "Original Model": [
+                    original["clean_accuracy"],
+                    original["fgsm_accuracy"],
+                    original["pgd_accuracy"],
+                ],
+                "Quantization Defense": [
+                    defended["clean_accuracy"],
+                    defended["fgsm_accuracy"],
+                    defended["pgd_accuracy"],
+                ],
+            },
+            index=[
+                "Clean Accuracy",
+                "FGSM Accuracy",
+                "PGD Accuracy",
+            ],
+        )
+
+        st.subheader("Accuracy Comparison")
+
+        st.bar_chart(comparison_data)
+
+        # Attack success rates
+        st.subheader("Attack Success Rate")
+
+        attack_data = pd.DataFrame(
+            {
+                "Original Model": [
+                    original["fgsm_attack_success_rate"],
+                    original["pgd_attack_success_rate"],
+                ],
+                "Quantization Defense": [
+                    defended["fgsm_attack_success_rate"],
+                    defended["pgd_attack_success_rate"],
+                ],
+            },
+            index=["FGSM", "PGD"],
+        )
+
+        st.bar_chart(attack_data)
+
+        # Explain the result
+        st.subheader("Defense Summary")
+
+        clean_change = (
+            defended["clean_accuracy"]
+            - original["clean_accuracy"]
+        )
+
+        pgd_change = (
+            defended["pgd_accuracy"]
+            - original["pgd_accuracy"]
+        )
+
+        st.write(
+            f"Clean accuracy change: {clean_change:+.2f} "
+            "percentage points."
+        )
+
+        st.write(
+            f"PGD accuracy change: {pgd_change:+.2f} "
+            "percentage points."
+        )
+
+        if pgd_change > 0 and clean_change >= -2:
+
+            st.success(
+                "The defense improved PGD accuracy in this run "
+                "while keeping the clean-accuracy reduction "
+                "within 2 percentage points. Further attack "
+                "validation is still required."
+            )
+
+        elif pgd_change <= 0:
+
+            st.warning(
+                "The defense did not improve PGD accuracy "
+                "in this run. It may require a different "
+                "configuration or defense method."
+            )
+
+        else:
+
+            st.warning(
+                "The defense improved PGD accuracy but also "
+                "reduced clean accuracy by more than "
+                "2 percentage points. Review the trade-off."
+            )
+
+        st.caption(
+            "Results are specific to this model, dataset subset, "
+            "configuration, and attack implementation. They are "
+            "not a security certification."
+        )
+
+
+# =====================================================
+# OPTION 5: ADAPTIVE RED-TEAM MISSION LAB
+# =====================================================
+elif page == "⚔️ Adaptive Red-Team Mission Lab":
+    from orchestrator.ui import render_red_team_mission_lab
+    render_red_team_mission_lab()
