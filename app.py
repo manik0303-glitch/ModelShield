@@ -20,6 +20,21 @@ from evaluation.trust_checks import (
 from evaluation.trust_flag import generate_trust_flag
 from evaluation.gradient_masking import analyze_gradient_masking
 import json
+from datetime import datetime, timezone
+from evaluation.regression_gate import (
+    GateVerdict,
+    MetricStatus,
+    MetricDirection,
+    EvaluationMetadata,
+    EvaluationSnapshot,
+    RegressionThresholds,
+    MetricDelta,
+    RegressionGateResult,
+    evaluate_regression_gate,
+    export_gate_report_json,
+    export_gate_report_markdown,
+    validate_snapshot_integrity,
+)
 
 
 # -------------------- PAGE CONFIG --------------------
@@ -73,6 +88,344 @@ def predict_image(model, image_tensor, device):
     return prediction, float(probabilities[prediction].item() * 100), probabilities
 
 
+
+
+def snapshot_from_cifar_session(role: str = "Snapshot"):
+    """Extracts a serializable EvaluationSnapshot from active CIFAR-10 evaluation session state."""
+    if st.session_state.get("cifar_eval_results") is None:
+        return None
+    results = st.session_state["cifar_eval_results"]
+    dataset_epsilon = st.session_state.get("cifar_eval_epsilon")
+    dataset_pgd_steps = st.session_state.get("cifar_eval_pgd_steps")
+    trust_flag = st.session_state.get("cifar_eval_trust_flag")
+    gm = st.session_state.get("gm_diag_results")
+
+    if dataset_epsilon is None or dataset_pgd_steps is None or "total_images" not in results:
+        return None
+
+    clean_trust_flag = None
+    if trust_flag and isinstance(trust_flag, dict):
+        clean_trust_flag = {
+            "status": str(trust_flag.get("status", "")),
+            "summary": str(trust_flag.get("summary", "")),
+            "passed": int(trust_flag.get("passed", 0)),
+            "failed": int(trust_flag.get("failed", 0)),
+            "total": int(trust_flag.get("total", 0)),
+        }
+
+    clean_gm = None
+    if gm and isinstance(gm, dict):
+        clean_gm = {
+            "status": str(gm.get("status", "")),
+            "summary": str(gm.get("summary", "")),
+            "warning_reasons": list(gm.get("warning_reasons", [])),
+        }
+
+    metadata = EvaluationMetadata(
+        model_name=f"Carmon2019Unlabeled_{role}",
+        dataset_name="CIFAR-10",
+        num_samples=int(results["total_images"]),
+        epsilon=float(dataset_epsilon),
+        alpha=float(min(2 / 255.0, dataset_epsilon)),
+        pgd_steps=int(dataset_pgd_steps),
+        random_start=True,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    metrics = {
+        "clean_accuracy": float(results["clean_accuracy"]),
+        "fgsm_accuracy": float(results["fgsm_accuracy"]),
+        "pgd_accuracy": float(results["pgd_accuracy"]),
+        "fgsm_attack_success_rate": float(results["fgsm_attack_success_rate"]),
+        "pgd_attack_success_rate": float(results["pgd_attack_success_rate"]),
+        "worst_case_attack_success_rate": float(results["worst_case_attack_success_rate"]),
+    }
+    return EvaluationSnapshot(
+        metadata=metadata,
+        metrics=metrics,
+        trust_flag=clean_trust_flag,
+        gradient_masking=clean_gm,
+    )
+
+
+def render_regression_gate_workspace():
+    st.header("⚖️ Model Security Regression Gate")
+    st.write(
+        "Compare an evaluated Baseline model with a Candidate model under equivalent conditions. "
+        "Enforces configurable regression tolerances for clean accuracy, adversarial robustness, "
+        "and attack success rates, producing an authoritative PASS, WARN, or FAIL verdict."
+    )
+
+    base_snap: EvaluationSnapshot | None = st.session_state.get("gate_baseline_snapshot")
+    cand_snap: EvaluationSnapshot | None = st.session_state.get("gate_candidate_snapshot")
+
+    col_base, col_cand = st.columns(2)
+
+    with col_base:
+        st.subheader("1. Baseline Snapshot")
+        if base_snap is not None:
+            st.success(f"**Loaded:** `{base_snap.metadata.model_name}`")
+            st.caption(
+                f"Dataset: **{base_snap.metadata.dataset_name}** ({base_snap.metadata.num_samples} samples) · "
+                f"ε: **{base_snap.metadata.epsilon:.6f}** · "
+                f"PGD steps: **{base_snap.metadata.pgd_steps}**"
+            )
+            b_m = base_snap.metrics
+            st.write(
+                f"- Clean Acc: **{b_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                f"- PGD Acc: **{b_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                f"- PGD ASR: **{b_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                f"- Worst-case ASR: **{b_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+            )
+            if base_snap.trust_flag:
+                tf_status = base_snap.trust_flag.get("status", "UNKNOWN")
+                st.caption(f"Trust checks: **{tf_status}** ({base_snap.trust_flag.get('passed', 0)}/{base_snap.trust_flag.get('total', 0)})")
+            if base_snap.gradient_masking:
+                gm_status = base_snap.gradient_masking.get("status", "UNKNOWN")
+                st.caption(f"Gradient masking: **{gm_status}**")
+
+            b_btn_col1, b_btn_col2 = st.columns(2)
+            with b_btn_col1:
+                if st.button("Use Active Evaluation", key="btn_base_use_active"):
+                    snap = snapshot_from_cifar_session(role="Baseline")
+                    if snap is not None:
+                        st.session_state["gate_baseline_snapshot"] = snap
+                        st.session_state["gate_result"] = None
+                        st.rerun()
+                    else:
+                        st.warning("No completed CIFAR-10 evaluation in session state.")
+            with b_btn_col2:
+                if st.button("Clear Baseline", key="btn_base_clear"):
+                    st.session_state["gate_baseline_snapshot"] = None
+                    st.session_state["gate_result"] = None
+                    st.rerun()
+        else:
+            st.info("No baseline snapshot loaded.")
+            if st.session_state.get("cifar_eval_results") is not None:
+                if st.button("Use Active CIFAR-10 Evaluation", key="btn_base_set_active"):
+                    snap = snapshot_from_cifar_session(role="Baseline")
+                    if snap is not None:
+                        st.session_state["gate_baseline_snapshot"] = snap
+                        st.session_state["gate_result"] = None
+                        st.rerun()
+            else:
+                st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
+
+        up_base = st.file_uploader("Upload Baseline JSON", type=["json"], key="upload_baseline_json")
+        if up_base is not None:
+            try:
+                data = json.load(up_base)
+                snap = EvaluationSnapshot.from_dict(data)
+                ok, errs, val_snap = validate_snapshot_integrity(snap, "Baseline")
+                if ok and val_snap:
+                    st.session_state["gate_baseline_snapshot"] = val_snap
+                    st.session_state["gate_result"] = None
+                    st.success("Baseline snapshot loaded from JSON.")
+                else:
+                    st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
+            except Exception as exc:
+                st.error(f"Failed to parse JSON file: {exc}")
+
+    with col_cand:
+        st.subheader("2. Candidate Snapshot")
+        if cand_snap is not None:
+            st.success(f"**Loaded:** `{cand_snap.metadata.model_name}`")
+            st.caption(
+                f"Dataset: **{cand_snap.metadata.dataset_name}** ({cand_snap.metadata.num_samples} samples) · "
+                f"ε: **{cand_snap.metadata.epsilon:.6f}** · "
+                f"PGD steps: **{cand_snap.metadata.pgd_steps}**"
+            )
+            c_m = cand_snap.metrics
+            st.write(
+                f"- Clean Acc: **{c_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                f"- PGD Acc: **{c_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                f"- PGD ASR: **{c_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                f"- Worst-case ASR: **{c_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+            )
+            if cand_snap.trust_flag:
+                tf_status = cand_snap.trust_flag.get("status", "UNKNOWN")
+                st.caption(f"Trust checks: **{tf_status}** ({cand_snap.trust_flag.get('passed', 0)}/{cand_snap.trust_flag.get('total', 0)})")
+            if cand_snap.gradient_masking:
+                gm_status = cand_snap.gradient_masking.get("status", "UNKNOWN")
+                st.caption(f"Gradient masking: **{gm_status}**")
+
+            c_btn_col1, c_btn_col2 = st.columns(2)
+            with c_btn_col1:
+                if st.button("Use Active Evaluation", key="btn_cand_use_active"):
+                    snap = snapshot_from_cifar_session(role="Candidate")
+                    if snap is not None:
+                        st.session_state["gate_candidate_snapshot"] = snap
+                        st.session_state["gate_result"] = None
+                        st.rerun()
+                    else:
+                        st.warning("No completed CIFAR-10 evaluation in session state.")
+            with c_btn_col2:
+                if st.button("Clear Candidate", key="btn_cand_clear"):
+                    st.session_state["gate_candidate_snapshot"] = None
+                    st.session_state["gate_result"] = None
+                    st.rerun()
+        else:
+            st.info("No candidate snapshot loaded.")
+            if st.session_state.get("cifar_eval_results") is not None:
+                if st.button("Use Active CIFAR-10 Evaluation", key="btn_cand_set_active"):
+                    snap = snapshot_from_cifar_session(role="Candidate")
+                    if snap is not None:
+                        st.session_state["gate_candidate_snapshot"] = snap
+                        st.session_state["gate_result"] = None
+                        st.rerun()
+            else:
+                st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
+
+        up_cand = st.file_uploader("Upload Candidate JSON", type=["json"], key="upload_candidate_json")
+        if up_cand is not None:
+            try:
+                data = json.load(up_cand)
+                snap = EvaluationSnapshot.from_dict(data)
+                ok, errs, val_snap = validate_snapshot_integrity(snap, "Candidate")
+                if ok and val_snap:
+                    st.session_state["gate_candidate_snapshot"] = val_snap
+                    st.session_state["gate_result"] = None
+                    st.success("Candidate snapshot loaded from JSON.")
+                else:
+                    st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
+            except Exception as exc:
+                st.error(f"Failed to parse JSON file: {exc}")
+
+    with st.expander("⚙️ Regression Gate Thresholds & Policies", expanded=False):
+        st.write("Configure allowable performance shifts (all values in percentage points):")
+        th_c1, th_c2, th_c3 = st.columns(3)
+        with th_c1:
+            st.markdown("**Clean Accuracy Drop**")
+            w_clean = st.number_input("Warning Drop (%)", min_value=0.0, max_value=20.0, value=0.5, step=0.1, key="th_w_clean")
+            m_clean = st.number_input("Failure Drop (%)", min_value=0.0, max_value=50.0, value=2.0, step=0.1, key="th_m_clean")
+            if w_clean > m_clean:
+                st.warning("Warning threshold should be <= failure threshold.")
+
+        with th_c2:
+            st.markdown("**PGD Robust Accuracy Drop**")
+            w_pgd = st.number_input("Warning Drop (%)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="th_w_pgd")
+            m_pgd = st.number_input("Failure Drop (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.1, key="th_m_pgd")
+            if w_pgd > m_pgd:
+                st.warning("Warning threshold should be <= failure threshold.")
+
+        with th_c3:
+            st.markdown("**PGD ASR Surge**")
+            w_asr = st.number_input("Warning Surge (%)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="th_w_asr")
+            m_asr = st.number_input("Failure Surge (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.1, key="th_m_asr")
+            if w_asr > m_asr:
+                st.warning("Warning threshold should be <= failure threshold.")
+
+        st.markdown("**Strict Policy Controls**")
+        p_c1, p_c2, p_c3 = st.columns(3)
+        with p_c1:
+            enforce_cond = st.checkbox("Enforce condition equality", value=True, key="th_enforce_cond", help="Rejects comparisons if dataset, sample count, epsilon, or PGD steps differ.")
+        with p_c2:
+            req_trust = st.checkbox("Require candidate trust checks PASS", value=True, key="th_req_trust", help="Rejects candidate if perturbation budget, pixel range, or output shapes fail.")
+        with p_c3:
+            rej_mask = st.checkbox("Reject gradient masking WARNING", value=True, key="th_rej_mask", help="Rejects candidate if suspicious gradient masking signals are detected.")
+
+    can_run = base_snap is not None and cand_snap is not None
+    if not can_run:
+        st.info("Load both a Baseline and a Candidate snapshot above to run the regression gate.")
+
+    if st.button("Run Security Regression Gate", type="primary", key="btn_run_gate", disabled=not can_run):
+        thresholds = RegressionThresholds(
+            max_clean_accuracy_drop=float(m_clean),
+            warn_clean_accuracy_drop=float(w_clean),
+            max_pgd_accuracy_drop=float(m_pgd),
+            warn_pgd_accuracy_drop=float(w_pgd),
+            max_pgd_asr_increase=float(m_asr),
+            warn_pgd_asr_increase=float(w_asr),
+            enforce_condition_equality=bool(enforce_cond),
+            require_trust_checks_pass=bool(req_trust),
+            reject_gradient_masking=bool(rej_mask),
+        )
+        try:
+            with st.spinner("Evaluating security regression gate..."):
+                res = evaluate_regression_gate(base_snap, cand_snap, thresholds=thresholds)
+                st.session_state["gate_result"] = res
+        except Exception as exc:
+            st.error(f"Regression gate execution failed: {exc}")
+
+    # Render results
+    res: RegressionGateResult | None = st.session_state.get("gate_result")
+    if res is not None:
+        st.divider()
+        st.subheader("Gate Verdict")
+        if res.verdict == GateVerdict.PASS:
+            st.success(f"### {res.verdict.value} ✅\n\n{res.summary}")
+        elif res.verdict == GateVerdict.WARN:
+            st.warning(f"### {res.verdict.value} ⚠️\n\n{res.summary}")
+        else:
+            st.error(f"### {res.verdict.value} ❌\n\n{res.summary}")
+
+        st.subheader("Comparative Metric Analysis")
+        if res.metric_deltas:
+            rows = []
+            for k, delta in res.metric_deltas.items():
+                icon = "✅ PASS" if delta.status == MetricStatus.OK else ("⚠️ WARN" if delta.status == MetricStatus.WARN else "❌ FAIL")
+                sign = "+" if delta.delta > 0 else ""
+                th_display = f"Max {delta.fail_threshold:.1f}%" if delta.fail_threshold is not None else "N/A"
+                rows.append({
+                    "Metric": k,
+                    "Baseline": f"{delta.baseline_value:.2f}%",
+                    "Candidate": f"{delta.candidate_value:.2f}%",
+                    "Delta (Cand - Base)": f"{sign}{delta.delta:.2f}%",
+                    "Status": icon,
+                    "Threshold Limit": th_display,
+                    "Diagnostic Explanation": delta.reason,
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if res.failures:
+            st.error("#### ❌ Critical Violations")
+            for f in res.failures:
+                st.write(f"- {f}")
+
+        if res.warnings:
+            st.warning("#### ⚠️ Warning-Level Findings")
+            for w in res.warnings:
+                st.write(f"- {w}")
+
+        if res.passed_checks:
+            with st.expander("Passed Sanity & Robustness Checks", expanded=False):
+                for p in res.passed_checks:
+                    st.write(f"- {p}")
+
+        if res.condition_compatibility:
+            with st.expander("Evaluation Condition Audit", expanded=False):
+                audit_rows = []
+                for cond, details in res.condition_compatibility.items():
+                    if isinstance(details, dict):
+                        audit_rows.append({
+                            "Condition": cond,
+                            "Baseline": str(details.get("baseline")),
+                            "Candidate": str(details.get("candidate")),
+                            "Compatible": "✅ YES" if details.get("matched") else "❌ NO",
+                        })
+                st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
+
+        st.subheader("Export Gate Artifacts")
+        json_report = export_gate_report_json(res)
+        md_report = export_gate_report_markdown(res)
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                "📥 Download JSON Gate Report",
+                data=json_report,
+                file_name="model_security_regression_report.json",
+                mime="application/json",
+                key="dl_gate_json",
+            )
+        with col_dl2:
+            st.download_button(
+                "📄 Download Markdown Summary",
+                data=md_report,
+                file_name="model_security_regression_summary.md",
+                mime="text/markdown",
+                key="dl_gate_md",
+            )
+
+
 # -------------------- HEADER / NAVIGATION --------------------
 st.title("🛡️ ModelShield")
 st.subheader("Adversarial Robustness Evaluation Dashboard")
@@ -87,6 +440,7 @@ page = st.sidebar.radio(
         "Test Your Own Image",
         "Create an Adversarial Image",
         "Test CIFAR-10 Dataset",
+        "⚖️ Model Security Regression Gate",
     ],
 )
 st.sidebar.caption("Model: Carmon2019Unlabeled · Dataset: CIFAR-10 · Input size: 32×32")
@@ -247,7 +601,7 @@ elif page == "Create an Adversarial Image":
 
 
 # -------------------- OPTION 3: TEST CIFAR-10 DATASET --------------------
-else:
+elif page == "Test CIFAR-10 Dataset":
     st.header("3. Test the CIFAR-10 Dataset")
     st.write(
         "Evaluate the pretrained model on a small CIFAR-10 sample, compare clean predictions "
@@ -366,6 +720,28 @@ else:
             for name, result in checks.items()
         ]
         st.dataframe(pd.DataFrame(check_rows), use_container_width=True, hide_index=True)
+
+        st.subheader("⚖️ Model Security Regression Gate Snapshots")
+        st.caption("Capture this evaluation run for comparison in the Regression Gate workspace:")
+        sb_col1, sb_col2 = st.columns(2)
+        with sb_col1:
+            if st.button("📌 Set as Regression Baseline", key="btn_save_cifar_baseline"):
+                snap = snapshot_from_cifar_session(role="Baseline")
+                if snap is not None:
+                    st.session_state["gate_baseline_snapshot"] = snap
+                    st.session_state["gate_result"] = None
+                    st.success("Current evaluation saved as Regression Baseline.")
+                else:
+                    st.error("Failed to construct snapshot: missing required evaluation results.")
+        with sb_col2:
+            if st.button("🎯 Set as Regression Candidate", key="btn_save_cifar_candidate"):
+                snap = snapshot_from_cifar_session(role="Candidate")
+                if snap is not None:
+                    st.session_state["gate_candidate_snapshot"] = snap
+                    st.session_state["gate_result"] = None
+                    st.success("Current evaluation saved as Regression Candidate.")
+                else:
+                    st.error("Failed to construct snapshot: missing required evaluation results.")
 
         st.subheader("Compare a CIFAR-10 Image")
         image_index = st.slider(
@@ -622,6 +998,10 @@ else:
 
     else:
         st.info("Choose the evaluation settings in the sidebar, then click **Run CIFAR-10 Evaluation**.")
+elif page == "⚖️ Model Security Regression Gate":
+    render_regression_gate_workspace()
+
+
 # =====================================================
 # DEFENSE VERIFICATION LAB
 # =====================================================

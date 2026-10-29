@@ -3,18 +3,29 @@
 An adversarial robustness evaluation platform for CIFAR-10 image classification models, featuring:
 - FGSM and PGD adversarial attack generation
 - Dataset-level robustness evaluation
-- Gradient-masking diagnostic suite (new in this branch)
+- Gradient-masking diagnostic suite
+- ⚖️ Model Security Regression Gate (new in this branch)
 - Defense Verification Lab (input quantization)
 - Trust check pipeline with PASS/WARNING/FAIL flags
 
 ---
 
-## 🆕 Gradient-Masking Diagnostic Suite
+## ⚖️ Model Security Regression Gate
 
-This branch adds a full gradient-masking detection feature to ModelShield, based on Athalye et al., *Obfuscated Gradients Give a False Sense of Security* (ICML 2018).
+Feature 15 adds an automated, policy-driven regression gate that compares baseline and candidate evaluation results under equivalent conditions.
 
-### What is Gradient Masking?
-Gradient masking is a failure mode where gradient-based attacks appear ineffective because the model's input gradients are vanishing, shattered, or misleading — **not because the model is genuinely robust**.
+### Key Capabilities:
+- **Condition Compatibility Verification:** Rejects evaluations with mismatched datasets, sample counts, $\epsilon$ perturbation budgets, or PGD iterations by default.
+- **Directional Regression Detection:** Detects clean accuracy drops, PGD robust accuracy drops, and Attack Success Rate (ASR) surges.
+- **Configurable Tolerances:** Two-tiered threshold configuration supporting early warning (`WARN`) and hard deployment block (`FAIL`).
+- **Integrity & Diagnostics Enforcement:** Propagates ModelShield trust flag results and rejects candidates with suspicious gradient-masking signatures.
+- **Authoritative Explanations & Reports:** Generates structured JSON reports for CI/CD runners and formatted Markdown summaries for pull request comments.
+
+---
+
+## 🔬 Gradient-Masking Diagnostic Suite
+
+ModelShield includes a full gradient-masking detection feature based on Athalye et al., *Obfuscated Gradients Give a False Sense of Security* (ICML 2018).
 
 ### 6 Diagnostic Signals
 | Signal | Method | Cost |
@@ -40,8 +51,10 @@ ModelShield/
 ├── defenses/
 │   └── defense_methods.py             # Identity and quantization defenses
 ├── evaluation/
-│   ├── gradient_masking.py            # 🆕 Gradient-masking diagnostic engine
-│   ├── test_gradient_masking.py       # 🆕 Unit tests (10 tests, no downloads needed)
+│   ├── regression_gate.py             # 🆕 Model security regression gate engine
+│   ├── test_regression_gate.py        # 🆕 Unit tests (26 tests, offline)
+│   ├── gradient_masking.py            # Gradient-masking diagnostic engine
+│   ├── test_gradient_masking.py       # Diagnostic unit tests (10 tests, offline)
 │   ├── trust_checks.py                # Perturbation/pixel/metric sanity checks
 │   ├── trust_flag.py                  # Aggregates checks into PASS/WARNING/FAIL
 │   ├── defense_evaluation.py          # Defense comparison evaluation
@@ -50,7 +63,7 @@ ModelShield/
 │   ├── load_model.py                  # Loads Carmon2019Unlabeled via RobustBench
 │   └── dataset.py                     # CIFAR-10 data loading utilities
 ├── requirements.txt
-└── ModelShield_Gradient_Masking_Implementation_Plan.md   # Full design spec
+└── ModelShield_Gradient_Masking_Implementation_Plan.md
 ```
 
 ---
@@ -75,35 +88,30 @@ Access it at `http://localhost:8501` in your browser.
 
 ## Running the Tests
 
-All unit tests run **without any network access or model downloads**:
+All unit tests run **offline without any network access or model downloads**:
+
+### Regression Gate Test Suite (26 tests)
 ```bash
-python -m pytest evaluation/test_gradient_masking.py -v
+python -m unittest evaluation.test_regression_gate -v
 ```
 
-Expected output:
-```text
-evaluation/test_gradient_masking.py .......... [100%]
-10 passed in 1.24s
+### Trust Checks & Trust Flag Tests
+```bash
+python evaluation/test_trust_checks.py
+python evaluation/test_trust_flag.py
 ```
 
 ---
 
-## How to Use the Gradient-Masking Detector
+## How to Use the Model Security Regression Gate
 
 1. Open the dashboard and navigate to **3. Test CIFAR-10 Dataset**.
-2. Click **Run CIFAR-10 Evaluation** to load the baseline attack results.
-3. Scroll to **🔬 Gradient-Masking Diagnostic Suite**.
-4. (Optional) Configure the diagnostic sample cap and random search setting.
-5. Click **Run Gradient-Masking Diagnostics**.
-
-### Output Statuses
-| Status | Meaning |
-|---|---|
-| ✅ `NO_STRONG_SIGNAL` | No suspicious gradient patterns detected in this run |
-| ⚠️ `WARNING` | One or more suspicious signals observed — evaluate with adaptive attacks |
-| ℹ️ `INCONCLUSIVE` | Insufficient clean-correct samples to assess gradients |
-
-> **Important:** A `WARNING` does *not* prove masking is present. A `NO_STRONG_SIGNAL` does *not* prove the model is robust. These are heuristic diagnostics.
+2. Run an evaluation on your baseline model, scroll to **⚖️ Model Security Regression Gate Snapshots**, and click **📌 Set as Regression Baseline**.
+3. Re-run an evaluation on your candidate model or defense configuration, and click **🎯 Set as Regression Candidate**.
+4. Switch to **⚖️ Model Security Regression Gate** from the sidebar navigation.
+5. Review the loaded snapshots, adjust regression tolerances in **⚙️ Regression Gate Thresholds & Policies** if desired, and click **Run Security Regression Gate**.
+6. Review the PASS/WARN/FAIL verdict, metric deltas table, and condition compatibility audit.
+7. Download the **JSON Report** or **Markdown Summary** using the export buttons.
 
 ---
 
