@@ -171,6 +171,45 @@ st.markdown("""
     font-size: 0.75rem;
     font-weight: 600;
 }
+
+/* Sample Visual Card */
+.ms-sample-card {
+    background: #0f172a;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 1rem;
+    text-align: center;
+    height: 100%;
+}
+.ms-pill-tag {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 0.85rem;
+}
+.ms-tag-clean { background: rgba(59, 130, 246, 0.2); color: #60A5FA; border: 1px solid rgba(59, 130, 246, 0.4); }
+.ms-tag-fgsm { background: rgba(245, 158, 11, 0.2); color: #FBBF24; border: 1px solid rgba(245, 158, 11, 0.4); }
+.ms-tag-pgd { background: rgba(239, 68, 68, 0.2); color: #F87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+.ms-tag-heatmap { background: rgba(168, 85, 247, 0.2); color: #C084FC; border: 1px solid rgba(168, 85, 247, 0.4); }
+.ms-pred-label {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #F8FAFC;
+    margin-top: 0.6rem;
+    margin-bottom: 0.2rem;
+}
+.ms-stat-sub {
+    font-size: 0.8rem;
+    color: #94A3B8;
+}
+.ms-stat-conf {
+    font-size: 0.82rem;
+    font-weight: 600;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -208,6 +247,26 @@ def tensor_to_display(tensor):
         .clamp(0, 1)
         .numpy()
     )
+
+
+def compute_perturbation_heatmap(orig_tensor, adv_tensor, colormap_name="inferno"):
+    """
+    Computes amplified L_infinity spatial perturbation heatmap across color channels.
+    Returns RGB uint8 numpy array ready for display.
+    """
+    import numpy as np
+    import matplotlib.cm as cm
+    # Compute absolute difference across RGB channels, take max across channels
+    diff = (adv_tensor.detach().cpu()[0] - orig_tensor.detach().cpu()[0]).abs()
+    spatial_diff = diff.max(dim=0)[0].numpy()  # shape (32, 32)
+    max_val = spatial_diff.max()
+    if max_val > 1e-7:
+        normalized = spatial_diff / max_val
+    else:
+        normalized = spatial_diff
+    cmap = cm.get_cmap(colormap_name)
+    colored = cmap(normalized)[:, :, :3]  # drop alpha, shape (32, 32, 3) in [0, 1]
+    return (colored * 255).astype(np.uint8)
 
 
 def predict_image(model, image_tensor, device):
@@ -513,11 +572,27 @@ elif page == "Test CIFAR-10 Dataset":
         ]
         st.dataframe(pd.DataFrame(check_rows), use_container_width=True, hide_index=True)
 
-        st.subheader("Compare a CIFAR-10 Image")
-        image_index = st.slider(
-            "Select a test image", min_value=0, max_value=len(labels) - 1, value=0,
-            key="dataset_image_index",
+        st.subheader("🔍 Sample-Level Adversarial Inspection")
+        st.write("Inspect sample-level CIFAR-10 instances, amplified spatial perturbation heatmaps, adversarial probability shifts, and Linf budget compliance:")
+
+        # Build options for selector dropdown
+        sample_options = []
+        for idx in range(len(labels)):
+            t_name = CLASS_NAMES[int(labels[idx].item())]
+            c_name = CLASS_NAMES[int(results["clean_predictions"][idx].item())]
+            p_name = CLASS_NAMES[int(results["pgd_predictions"][idx].item())]
+            is_fooled = (c_name == t_name and p_name != t_name)
+            status_text = "💥 FOOLED" if is_fooled else ("CORRECT" if p_name == t_name else "MISCLASSIFIED")
+            sample_options.append(f"Sample {idx + 1}: {t_name} · Clean: {c_name} · PGD: {p_name} ({status_text})")
+
+        selected_label = st.selectbox(
+            "Select CIFAR-10 Instance to Inspect:",
+            options=sample_options,
+            index=0,
+            key="dataset_sample_selector",
         )
+        image_index = sample_options.index(selected_label)
+
         clean_image = images[image_index:image_index + 1]
         fgsm_image = results["fgsm_images"][image_index:image_index + 1]
         pgd_image = results["pgd_images"][image_index:image_index + 1]
@@ -525,19 +600,82 @@ elif page == "Test CIFAR-10 Dataset":
         fgsm_pred = int(results["fgsm_predictions"][image_index].item())
         pgd_pred = int(results["pgd_predictions"][image_index].item())
         true_label = int(labels[image_index].item())
-        i1, i2, i3 = st.columns(3)
-        with i1:
-            st.image(tensor_to_display(clean_image), caption="Original", use_container_width=True)
-            st.write(f"True label: **{CLASS_NAMES[true_label]}**")
-            st.write(f"Prediction: **{CLASS_NAMES[clean_pred]}**")
-        with i2:
-            st.image(tensor_to_display(fgsm_image), caption="FGSM", use_container_width=True)
-            st.write(f"Prediction: **{CLASS_NAMES[fgsm_pred]}**")
-            st.write("Correct" if fgsm_pred == true_label else "Misclassified")
-        with i3:
-            st.image(tensor_to_display(pgd_image), caption="PGD", use_container_width=True)
-            st.write(f"Prediction: **{CLASS_NAMES[pgd_pred]}**")
-            st.write("Correct" if pgd_pred == true_label else "Misclassified")
+
+        # Compute model confidence for clean and adversarial images
+        with torch.no_grad():
+            clean_logits = model(clean_image)
+            clean_conf = float(torch.softmax(clean_logits, dim=1)[0, clean_pred].item() * 100)
+            fgsm_logits = model(fgsm_image)
+            fgsm_conf = float(torch.softmax(fgsm_logits, dim=1)[0, fgsm_pred].item() * 100)
+            pgd_logits = model(pgd_image)
+            pgd_conf = float(torch.softmax(pgd_logits, dim=1)[0, pgd_pred].item() * 100)
+
+        # Compute perturbation metrics
+        fgsm_linf = float((fgsm_image - clean_image).abs().max().item())
+        pgd_linf = float((pgd_image - clean_image).abs().max().item())
+
+        # Compute Spatial Gradient / Perturbation Heatmap
+        heatmap_img = compute_perturbation_heatmap(clean_image, pgd_image, colormap_name="inferno")
+
+        # 4-Column Layout matching the requested design
+        col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+
+        with col_c1:
+            st.markdown("""
+            <div class="ms-sample-card">
+                <div class="ms-pill-tag ms-tag-clean">Clean Input</div>
+            """, unsafe_allow_html=True)
+            st.image(tensor_to_display(clean_image), use_container_width=True)
+            conf_color = "#34D399" if clean_pred == true_label else "#F87171"
+            st.markdown(f"""
+                <div class="ms-pred-label">{CLASS_NAMES[clean_pred]}</div>
+                <div class="ms-stat-sub">True: {CLASS_NAMES[true_label]}</div>
+                <div class="ms-stat-conf" style="color: {conf_color};">Conf: {clean_conf:.2f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_c2:
+            st.markdown("""
+            <div class="ms-sample-card">
+                <div class="ms-pill-tag ms-tag-fgsm">FGSM 1-Step</div>
+            """, unsafe_allow_html=True)
+            st.image(tensor_to_display(fgsm_image), use_container_width=True)
+            conf_color = "#34D399" if fgsm_pred == true_label else "#F87171"
+            st.markdown(f"""
+                <div class="ms-pred-label">{CLASS_NAMES[fgsm_pred]}</div>
+                <div class="ms-stat-sub">L<sub>∞</sub>: {fgsm_linf:.4f}</div>
+                <div class="ms-stat-conf" style="color: {conf_color};">Conf: {fgsm_conf:.2f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_c3:
+            st.markdown("""
+            <div class="ms-sample-card">
+                <div class="ms-pill-tag ms-tag-pgd">PGD-10 Iterative</div>
+            """, unsafe_allow_html=True)
+            st.image(tensor_to_display(pgd_image), use_container_width=True)
+            conf_color = "#34D399" if pgd_pred == true_label else "#F87171"
+            st.markdown(f"""
+                <div class="ms-pred-label">{CLASS_NAMES[pgd_pred]}</div>
+                <div class="ms-stat-sub">L<sub>∞</sub>: {pgd_linf:.4f}</div>
+                <div class="ms-stat-conf" style="color: {conf_color};">Conf: {pgd_conf:.2f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_c4:
+            st.markdown("""
+            <div class="ms-sample-card">
+                <div class="ms-pill-tag ms-tag-heatmap">Perturbation Heatmap</div>
+            """, unsafe_allow_html=True)
+            st.image(heatmap_img, use_container_width=True)
+            st.markdown(f"""
+                <div class="ms-pred-label" style="font-size: 1rem;">Spatial Gradient Focus</div>
+                <div class="ms-stat-sub">Colormap: Inferno</div>
+                <div class="ms-stat-conf" style="color: #60A5FA;">Budget: ≤ {dataset_epsilon:.4f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 1.25rem;'></div>", unsafe_allow_html=True)
 
         export_df = pd.DataFrame({
             "Image_Index": list(range(len(labels))),
