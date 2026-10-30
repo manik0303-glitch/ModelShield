@@ -126,9 +126,9 @@ if page == "Test Your Own Image":
             resized_image, image_tensor = image_tensor_from_pil(original_image)
             col1, col2 = st.columns(2)
             with col1:
-                st.image(original_image, caption="Uploaded image", use_container_width=True)
+                st.image(original_image, caption="Uploaded image", use_column_width=True)
             with col2:
-                st.image(resized_image, caption="Model input (32 × 32)", use_container_width=True)
+                st.image(resized_image, caption="Model input (32 × 32)", use_column_width=True)
 
             if st.button("Test Image", type="primary", key="test_own_image"):
                 with st.spinner("Loading model and predicting..."):
@@ -184,9 +184,9 @@ elif page == "Create an Adversarial Image":
             resized_image, image_tensor_cpu = image_tensor_from_pil(original_image)
             col1, col2 = st.columns(2)
             with col1:
-                st.image(original_image, caption="Uploaded image", use_container_width=True)
+                st.image(original_image, caption="Uploaded image", use_column_width=True)
             with col2:
-                st.image(resized_image, caption="Resized model input (32 × 32)", use_container_width=True)
+                st.image(resized_image, caption="Resized model input (32 × 32)", use_column_width=True)
 
             if st.button("Generate Adversarial Image", type="primary", key="make_adversarial"):
                 with st.spinner("Generating attack... this may take a little while on CPU."):
@@ -225,11 +225,11 @@ elif page == "Create an Adversarial Image":
                 st.subheader("Attack Results")
                 result_col1, result_col2 = st.columns(2)
                 with result_col1:
-                    st.image(resized_image, caption="Original model input", use_container_width=True)
+                    st.image(resized_image, caption="Original model input", use_column_width=True)
                     st.write(f"**Prediction:** {CLASS_NAMES[original_prediction]}")
                     st.metric("Original confidence", f"{original_confidence:.2f}%")
                 with result_col2:
-                    st.image(tensor_to_display(adversarial_tensor), caption=f"{attack_type} adversarial image", use_container_width=True)
+                    st.image(tensor_to_display(adversarial_tensor), caption=f"{attack_type} adversarial image", use_column_width=True)
                     st.write(f"**Prediction:** {CLASS_NAMES[adversarial_prediction]}")
                     st.metric("Adversarial confidence", f"{adversarial_confidence:.2f}%")
 
@@ -372,15 +372,15 @@ elif page == "Test CIFAR-10 Dataset":
             true_label = int(labels[image_index].item())
             i1, i2, i3 = st.columns(3)
             with i1:
-                st.image(tensor_to_display(clean_image), caption="Original", use_container_width=True)
+                st.image(tensor_to_display(clean_image), caption="Original", use_column_width=True)
                 st.write(f"True label: **{CLASS_NAMES[true_label]}**")
                 st.write(f"Prediction: **{CLASS_NAMES[clean_pred]}**")
             with i2:
-                st.image(tensor_to_display(fgsm_image), caption="FGSM", use_container_width=True)
+                st.image(tensor_to_display(fgsm_image), caption="FGSM", use_column_width=True)
                 st.write(f"Prediction: **{CLASS_NAMES[fgsm_pred]}**")
                 st.write("Correct" if fgsm_pred == true_label else "Misclassified")
             with i3:
-                st.image(tensor_to_display(pgd_image), caption="PGD", use_container_width=True)
+                st.image(tensor_to_display(pgd_image), caption="PGD", use_column_width=True)
                 st.write(f"Prediction: **{CLASS_NAMES[pgd_pred]}**")
                 st.write("Correct" if pgd_pred == true_label else "Misclassified")
 
