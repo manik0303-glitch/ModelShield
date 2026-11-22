@@ -42,3 +42,7 @@ pip install -r requirements.txt
 ```bash
 uvicorn app.main:app --reload
 ```
+
+## RAM++ image recognition
+
+For the local Windows installer and photo tagging command, see the [RAM++ setup guide](ram-plus/README.md).

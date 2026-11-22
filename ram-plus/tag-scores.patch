@@ -1,0 +1,33 @@
+diff --git a/ram/models/ram_plus.py b/ram/models/ram_plus.py
+index 925d76c..c558e88 100644
+--- a/ram/models/ram_plus.py
++++ b/ram/models/ram_plus.py
+@@ -278,7 +278,7 @@ class RAM_plus(nn.Module):
+ 
+ 
+     def generate_tag(self,
+-                 image
++                 image, return_scores=False
+                  ):
+ 
+         image_embeds = self.image_proj(self.visual_encoder(image))
+@@ -319,8 +319,9 @@ class RAM_plus(nn.Module):
+ 
+         logits = self.fc(tagging_embed[0]).squeeze(-1)
+ 
++        scores = torch.sigmoid(logits)
+         targets = torch.where(
+-            torch.sigmoid(logits) > self.class_threshold.to(image.device),
++            scores > self.class_threshold.to(image.device),
+             torch.tensor(1.0).to(image.device),
+             torch.zeros(self.num_class).to(image.device))
+ 
+@@ -336,6 +337,8 @@ class RAM_plus(nn.Module):
+             tag_output_chinese.append(' | '.join(token_chinese))
+ 
+ 
++        if return_scores:
++            return tag_output, tag_output_chinese, scores
+         return tag_output, tag_output_chinese
+ 
+     def generate_tag_openset(self,
