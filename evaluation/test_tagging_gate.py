@@ -337,6 +337,144 @@ class TestTaggingRegressionGate(unittest.TestCase):
         self.assertIn("| `pgd_map` |", md_str)
         self.assertIn("| `tag_retention_rate` |", md_str)
 
+    def test_tag_vocabulary_mismatch_failure(self):
+        """Comparing models evaluated on different tag vocabularies must FAIL."""
+        base = get_base_tagging_fixture()
+        base.metadata.tag_vocabulary_name = "RAM_Plus_4585"
+        cand = get_candidate_tagging_fixture(meta_overrides={"tag_vocabulary_name": "OpenImages_5000"})
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.FAIL)
+        self.assertTrue(any("Tag vocabulary mismatch" in f for f in result.failures))
+
+    def test_tag_vocabulary_size_mismatch_failure(self):
+        """Comparing models with different tag counts must FAIL."""
+        base = get_base_tagging_fixture()
+        base.metadata.num_tags = 4585
+        cand = get_candidate_tagging_fixture(meta_overrides={"num_tags": 80})
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.FAIL)
+        self.assertTrue(any("Tag vocabulary size mismatch" in f for f in result.failures))
+
+    def test_evaluation_protocol_mismatch_failure(self):
+        """Comparing models evaluated with different protocols must FAIL."""
+        base = get_base_tagging_fixture()
+        base.metadata.evaluation_protocol = "zero_shot_topk"
+        cand = get_candidate_tagging_fixture(meta_overrides={"evaluation_protocol": "threshold_sweep"})
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.FAIL)
+        self.assertTrue(any("Evaluation protocol mismatch" in f for f in result.failures))
+
+    def test_tagging_trust_check_failure_propagation(self):
+        """Candidate trust checks failure must cause gate FAIL for image tagging."""
+        base = get_base_tagging_fixture()
+        cand = get_candidate_tagging_fixture(
+            trust_flag={
+                "status": "FAIL",
+                "summary": "Perturbation budget exceeded maximum epsilon.",
+                "passed": 2,
+                "failed": 2,
+                "total": 4,
+            }
+        )
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.FAIL)
+        self.assertTrue(any("Candidate failed ModelShield trust checks" in f for f in result.failures))
+
+    def test_tagging_trust_check_warning_propagation(self):
+        """Candidate trust checks warning must produce gate WARN without FAIL."""
+        base = get_base_tagging_fixture()
+        cand = get_candidate_tagging_fixture(
+            trust_flag={
+                "status": "WARNING",
+                "summary": "Output distribution has low entropy.",
+                "passed": 3,
+                "failed": 1,
+                "total": 4,
+            }
+        )
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.WARN)
+        self.assertTrue(any("trust checks warning" in w for w in result.warnings))
+
+    def test_tagging_gradient_masking_warning_rejection(self):
+        """Candidate exhibiting gradient masking signals must cause gate FAIL."""
+        base = get_base_tagging_fixture()
+        cand = get_candidate_tagging_fixture(
+            gradient_masking={
+                "status": "WARNING",
+                "summary": "Near-zero gradient norm detected across tags.",
+                "warning_reasons": ["Shattered gradients along loss ray"],
+            }
+        )
+        result = evaluate_regression_gate(base, cand)
+        self.assertEqual(result.verdict, GateVerdict.FAIL)
+        self.assertTrue(any("suspicious gradient masking" in f for f in result.failures))
+
+    def test_snapshot_contract_full_roundtrip(self):
+        """Verifies full EvaluationSnapshot contract serialization and deserialization."""
+        snapshot_dict = {
+            "metadata": {
+                "model_name": "RAM_Plus_SwinL",
+                "architecture": "Swin-Large",
+                "dataset_name": "COCO-Tagging-2017",
+                "task_type": "image_tagging",
+                "evaluation_protocol": "fixed_threshold_0.68",
+                "tag_vocabulary_name": "ram_plus_4585",
+                "num_tags": 4585,
+                "num_samples": 100,
+                "epsilon": 0.0313725,
+                "alpha": 0.0078431,
+                "pgd_steps": 10,
+                "random_start": True,
+                "timestamp": "2026-11-24T00:00:00Z",
+                "extra": {"device": "cpu", "vit_backbone": "swin_l"},
+            },
+            "metrics": {
+                "clean_map": 86.4,
+                "clean_precision": 83.1,
+                "clean_recall": 81.5,
+                "clean_f1": 82.3,
+                "fgsm_map": 66.8,
+                "pgd_map": 61.2,
+                "tag_retention_rate": 76.5,
+                "tag_drop_rate": 23.5,
+                "tag_injection_rate": 14.2,
+            },
+            "trust_flag": {
+                "status": "PASS",
+                "summary": "All 4 checks passed.",
+                "passed": 4,
+                "failed": 0,
+                "total": 4,
+            },
+            "gradient_masking": {
+                "status": "NO_STRONG_SIGNAL",
+                "summary": "No gradient masking detected.",
+                "warning_reasons": [],
+            },
+            "raw_checks": {"perturbation": True, "pixel_range": True},
+        }
+
+        # Deserialization
+        snap = EvaluationSnapshot.from_dict(snapshot_dict)
+        self.assertEqual(snap.metadata.task_type, "image_tagging")
+        self.assertEqual(snap.metadata.architecture, "Swin-Large")
+        self.assertEqual(snap.metadata.tag_vocabulary_name, "ram_plus_4585")
+        self.assertEqual(snap.metadata.num_tags, 4585)
+        self.assertEqual(snap.metadata.evaluation_protocol, "fixed_threshold_0.68")
+        self.assertEqual(snap.metrics["clean_map"], 86.4)
+        self.assertEqual(snap.metrics["tag_retention_rate"], 76.5)
+
+        # Integrity Validation
+        ok, errs, val_snap = validate_snapshot_integrity(snap, "ContractSnapshot")
+        self.assertTrue(ok, f"Contract validation failed: {errs}")
+
+        # Serialization
+        serialized = snap.to_dict()
+        self.assertEqual(serialized["metadata"]["task_type"], "image_tagging")
+        self.assertEqual(serialized["metadata"]["architecture"], "Swin-Large")
+        self.assertEqual(serialized["metrics"]["clean_map"], 86.4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -453,18 +453,27 @@ def render_regression_gate_workspace():
             st.subheader("1. Baseline Snapshot")
             if base_snap is not None:
                 st.success(f"**Loaded:** `{base_snap.metadata.model_name}`")
+                task_badge = f"Task: **{base_snap.metadata.task_type}** · " if getattr(base_snap.metadata, "task_type", None) else ""
                 st.caption(
-                    f"Dataset: **{base_snap.metadata.dataset_name}** ({base_snap.metadata.num_samples} samples) · "
+                    f"{task_badge}Dataset: **{base_snap.metadata.dataset_name}** ({base_snap.metadata.num_samples} samples) · "
                     f"ε: **{base_snap.metadata.epsilon:.6f}** · "
                     f"PGD steps: **{base_snap.metadata.pgd_steps}**"
                 )
                 b_m = base_snap.metrics
-                st.write(
-                    f"- Clean Acc: **{b_m.get('clean_accuracy', 0.0):.2f}%**\n"
-                    f"- PGD Acc: **{b_m.get('pgd_accuracy', 0.0):.2f}%**\n"
-                    f"- PGD ASR: **{b_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
-                    f"- Worst-case ASR: **{b_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
-                )
+                if getattr(base_snap.metadata, "task_type", "classification") == "image_tagging":
+                    st.write(
+                        f"- Clean mAP: **{b_m.get('clean_map', 0.0):.2f}%**\n"
+                        f"- PGD mAP: **{b_m.get('pgd_map', 0.0):.2f}%**\n"
+                        f"- Tag Retention: **{b_m.get('tag_retention_rate', 0.0):.2f}%**\n"
+                        f"- Tag Drop Rate: **{b_m.get('tag_drop_rate', 0.0):.2f}%**"
+                    )
+                else:
+                    st.write(
+                        f"- Clean Acc: **{b_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                        f"- PGD Acc: **{b_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                        f"- PGD ASR: **{b_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                        f"- Worst-case ASR: **{b_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+                    )
                 if base_snap.trust_flag:
                     tf_status = base_snap.trust_flag.get("status", "UNKNOWN")
                     st.caption(f"Trust checks: **{tf_status}** ({base_snap.trust_flag.get('passed', 0)}/{base_snap.trust_flag.get('total', 0)})")
@@ -518,18 +527,27 @@ def render_regression_gate_workspace():
             st.subheader("2. Candidate Snapshot")
             if cand_snap is not None:
                 st.success(f"**Loaded:** `{cand_snap.metadata.model_name}`")
+                c_task_badge = f"Task: **{cand_snap.metadata.task_type}** · " if getattr(cand_snap.metadata, "task_type", None) else ""
                 st.caption(
-                    f"Dataset: **{cand_snap.metadata.dataset_name}** ({cand_snap.metadata.num_samples} samples) · "
+                    f"{c_task_badge}Dataset: **{cand_snap.metadata.dataset_name}** ({cand_snap.metadata.num_samples} samples) · "
                     f"ε: **{cand_snap.metadata.epsilon:.6f}** · "
                     f"PGD steps: **{cand_snap.metadata.pgd_steps}**"
                 )
                 c_m = cand_snap.metrics
-                st.write(
-                    f"- Clean Acc: **{c_m.get('clean_accuracy', 0.0):.2f}%**\n"
-                    f"- PGD Acc: **{c_m.get('pgd_accuracy', 0.0):.2f}%**\n"
-                    f"- PGD ASR: **{c_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
-                    f"- Worst-case ASR: **{c_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
-                )
+                if getattr(cand_snap.metadata, "task_type", "classification") == "image_tagging":
+                    st.write(
+                        f"- Clean mAP: **{c_m.get('clean_map', 0.0):.2f}%**\n"
+                        f"- PGD mAP: **{c_m.get('pgd_map', 0.0):.2f}%**\n"
+                        f"- Tag Retention: **{c_m.get('tag_retention_rate', 0.0):.2f}%**\n"
+                        f"- Tag Drop Rate: **{c_m.get('tag_drop_rate', 0.0):.2f}%**"
+                    )
+                else:
+                    st.write(
+                        f"- Clean Acc: **{c_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                        f"- PGD Acc: **{c_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                        f"- PGD ASR: **{c_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                        f"- Worst-case ASR: **{c_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+                    )
                 if cand_snap.trust_flag:
                     tf_status = cand_snap.trust_flag.get("status", "UNKNOWN")
                     st.caption(f"Trust checks: **{tf_status}** ({cand_snap.trust_flag.get('passed', 0)}/{cand_snap.trust_flag.get('total', 0)})")
@@ -611,6 +629,31 @@ def render_regression_gate_workspace():
             if w_asr > m_asr:
                 st.warning("Warning threshold should be <= failure threshold.")
 
+        is_tagging_active = (
+            (base_snap_curr is not None and getattr(base_snap_curr.metadata, "task_type", "classification") == "image_tagging")
+            or (cand_snap_curr is not None and getattr(cand_snap_curr.metadata, "task_type", "classification") == "image_tagging")
+        )
+
+        if is_tagging_active:
+            st.markdown("##### Multi-Label Tagging Tolerances (RAM++)")
+            tag_c1, tag_c2, tag_c3 = st.columns(3)
+            with tag_c1:
+                st.markdown("**Clean mAP Drop**")
+                w_map = st.number_input("Warning Drop (%)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="th_w_map")
+                m_map = st.number_input("Failure Drop (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.1, key="th_m_map")
+            with tag_c2:
+                st.markdown("**PGD mAP Drop**")
+                w_pgd_map = st.number_input("Warning Drop (%)", min_value=0.0, max_value=20.0, value=1.5, step=0.1, key="th_w_pgd_map")
+                m_pgd_map = st.number_input("Failure Drop (%)", min_value=0.0, max_value=50.0, value=4.0, step=0.1, key="th_m_pgd_map")
+            with tag_c3:
+                st.markdown("**Tag Retention Drop**")
+                w_ret = st.number_input("Warning Drop (%)", min_value=0.0, max_value=20.0, value=2.0, step=0.1, key="th_w_ret")
+                m_ret = st.number_input("Failure Drop (%)", min_value=0.0, max_value=50.0, value=5.0, step=0.1, key="th_m_ret")
+        else:
+            w_map, m_map = 1.0, 3.0
+            w_pgd_map, m_pgd_map = 1.5, 4.0
+            w_ret, m_ret = 2.0, 5.0
+
         st.markdown("**Strict Policy Controls**")
         p_c1, p_c2, p_c3 = st.columns(3)
         with p_c1:
@@ -630,6 +673,12 @@ def render_regression_gate_workspace():
             warn_pgd_accuracy_drop=float(w_pgd),
             max_pgd_asr_increase=float(m_asr),
             warn_pgd_asr_increase=float(w_asr),
+            max_clean_map_drop=float(m_map),
+            warn_clean_map_drop=float(w_map),
+            max_pgd_map_drop=float(m_pgd_map),
+            warn_pgd_map_drop=float(w_pgd_map),
+            max_tag_retention_drop=float(m_ret),
+            warn_tag_retention_drop=float(w_ret),
             enforce_condition_equality=bool(enforce_cond),
             require_trust_checks_pass=bool(req_trust),
             reject_gradient_masking=bool(rej_mask),

@@ -113,6 +113,10 @@ class EvaluationMetadata:
     random_start: Optional[bool] = None
     timestamp: Optional[str] = None
     task_type: str = "classification"
+    architecture: Optional[str] = None
+    evaluation_protocol: Optional[str] = None
+    tag_vocabulary_name: Optional[str] = None
+    num_tags: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -139,6 +143,23 @@ class EvaluationMetadata:
             else "classification"
         )
 
+        extra_dict = data.get("extra", {}) if isinstance(data.get("extra"), dict) else {}
+
+        arch = data.get("architecture") or extra_dict.get("architecture")
+        proto = data.get("evaluation_protocol") or extra_dict.get("evaluation_protocol")
+        vocab = (
+            data.get("tag_vocabulary_name")
+            or extra_dict.get("tag_vocabulary_name")
+            or extra_dict.get("tag_vocabulary")
+            or extra_dict.get("vocabulary")
+        )
+        tags_cnt_raw = (
+            data.get("num_tags")
+            or extra_dict.get("num_tags")
+            or extra_dict.get("tag_vocabulary_size")
+        )
+        tags_cnt = int(tags_cnt_raw) if tags_cnt_raw is not None and not isinstance(tags_cnt_raw, bool) else None
+
         return cls(
             model_name=str(data.get("model_name", "UnknownModel")),
             dataset_name=str(data.get("dataset_name", "")),
@@ -149,7 +170,11 @@ class EvaluationMetadata:
             random_start=bool(data["random_start"]) if data.get("random_start") is not None else None,
             timestamp=data.get("timestamp"),
             task_type=task_type,
-            extra=data.get("extra", {}) if isinstance(data.get("extra"), dict) else {},
+            architecture=str(arch) if arch is not None else None,
+            evaluation_protocol=str(proto) if proto is not None else None,
+            tag_vocabulary_name=str(vocab) if vocab is not None else None,
+            num_tags=tags_cnt,
+            extra=extra_dict,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -514,6 +539,51 @@ def validate_evaluation_conditions(
             f"Perturbation budget (epsilon) mismatch: Baseline={base_meta.epsilon:.6f}, "
             f"Candidate={cand_meta.epsilon:.6f} (tolerance={thresholds.epsilon_tolerance})."
         )
+
+    # Tag vocabulary compatibility (when specified in either snapshot)
+    b_vocab = base_meta.tag_vocabulary_name or (base_meta.extra.get("tag_vocabulary_name") if isinstance(base_meta.extra, dict) else None) or (base_meta.extra.get("vocabulary") if isinstance(base_meta.extra, dict) else None)
+    c_vocab = cand_meta.tag_vocabulary_name or (cand_meta.extra.get("tag_vocabulary_name") if isinstance(cand_meta.extra, dict) else None) or (cand_meta.extra.get("vocabulary") if isinstance(cand_meta.extra, dict) else None)
+    if b_vocab is not None and c_vocab is not None:
+        matched_vocab = str(b_vocab).strip().lower() == str(c_vocab).strip().lower()
+        audit["tag_vocabulary"] = {
+            "baseline": str(b_vocab),
+            "candidate": str(c_vocab),
+            "matched": matched_vocab,
+        }
+        if not matched_vocab:
+            mismatches.append(
+                f"Tag vocabulary mismatch: Baseline used '{b_vocab}', Candidate used '{c_vocab}'. Incompatible label mappings cannot be reliably compared."
+            )
+
+    # Tag vocabulary size compatibility (when specified in either snapshot)
+    b_num_tags = base_meta.num_tags if base_meta.num_tags is not None else ((base_meta.extra.get("num_tags") or base_meta.extra.get("tag_vocabulary_size")) if isinstance(base_meta.extra, dict) else None)
+    c_num_tags = cand_meta.num_tags if cand_meta.num_tags is not None else ((cand_meta.extra.get("num_tags") or cand_meta.extra.get("tag_vocabulary_size")) if isinstance(cand_meta.extra, dict) else None)
+    if b_num_tags is not None and c_num_tags is not None:
+        matched_tags = int(b_num_tags) == int(c_num_tags)
+        audit["num_tags"] = {
+            "baseline": int(b_num_tags),
+            "candidate": int(c_num_tags),
+            "matched": matched_tags,
+        }
+        if not matched_tags:
+            mismatches.append(
+                f"Tag vocabulary size mismatch: Baseline has {b_num_tags} tags, Candidate has {c_num_tags} tags. Models must evaluate against equivalent label sets."
+            )
+
+    # Evaluation protocol compatibility (when specified in either snapshot)
+    b_proto = base_meta.evaluation_protocol or (base_meta.extra.get("evaluation_protocol") if isinstance(base_meta.extra, dict) else None)
+    c_proto = cand_meta.evaluation_protocol or (cand_meta.extra.get("evaluation_protocol") if isinstance(cand_meta.extra, dict) else None)
+    if b_proto is not None and c_proto is not None:
+        matched_proto = str(b_proto).strip().lower() == str(c_proto).strip().lower()
+        audit["evaluation_protocol"] = {
+            "baseline": str(b_proto),
+            "candidate": str(c_proto),
+            "matched": matched_proto,
+        }
+        if not matched_proto:
+            mismatches.append(
+                f"Evaluation protocol mismatch: Baseline used '{b_proto}', Candidate used '{c_proto}'. Models must follow equivalent evaluation procedures."
+            )
 
     # Check PGD condition requirements when PGD metrics are present in both
     b_has_pgd = False
