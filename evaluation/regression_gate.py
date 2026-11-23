@@ -40,7 +40,15 @@ class MetricStatus(str, Enum):
     FAIL = "FAIL"
 
 
-SUPPORTED_METRICS = {
+class TaskType(str, Enum):
+    CLASSIFICATION = "classification"
+    IMAGE_TAGGING = "image_tagging"
+
+
+DEFAULT_TASK_TYPE = TaskType.CLASSIFICATION.value
+SUPPORTED_TASK_TYPES = {TaskType.CLASSIFICATION.value, TaskType.IMAGE_TAGGING.value}
+
+CLASSIFICATION_METRICS = {
     "clean_accuracy": MetricDirection.HIGHER_IS_BETTER,
     "fgsm_accuracy": MetricDirection.HIGHER_IS_BETTER,
     "pgd_accuracy": MetricDirection.HIGHER_IS_BETTER,
@@ -49,7 +57,24 @@ SUPPORTED_METRICS = {
     "worst_case_attack_success_rate": MetricDirection.LOWER_IS_BETTER,
 }
 
-ADVERSARIAL_METRIC_KEYS = {
+IMAGE_TAGGING_METRICS = {
+    "clean_map": MetricDirection.HIGHER_IS_BETTER,
+    "clean_precision": MetricDirection.HIGHER_IS_BETTER,
+    "clean_recall": MetricDirection.HIGHER_IS_BETTER,
+    "clean_f1": MetricDirection.HIGHER_IS_BETTER,
+    "fgsm_map": MetricDirection.HIGHER_IS_BETTER,
+    "pgd_map": MetricDirection.HIGHER_IS_BETTER,
+    "tag_retention_rate": MetricDirection.HIGHER_IS_BETTER,
+    "tag_drop_rate": MetricDirection.LOWER_IS_BETTER,
+    "tag_injection_rate": MetricDirection.LOWER_IS_BETTER,
+}
+
+SUPPORTED_METRICS = {
+    **CLASSIFICATION_METRICS,
+    **IMAGE_TAGGING_METRICS,
+}
+
+ADVERSARIAL_CLASSIFICATION_METRIC_KEYS = {
     "fgsm_accuracy",
     "pgd_accuracy",
     "fgsm_attack_success_rate",
@@ -57,9 +82,22 @@ ADVERSARIAL_METRIC_KEYS = {
     "worst_case_attack_success_rate",
 }
 
+ADVERSARIAL_TAGGING_METRIC_KEYS = {
+    "fgsm_map",
+    "pgd_map",
+    "tag_retention_rate",
+    "tag_drop_rate",
+    "tag_injection_rate",
+}
+
+ADVERSARIAL_METRIC_KEYS = (
+    ADVERSARIAL_CLASSIFICATION_METRIC_KEYS | ADVERSARIAL_TAGGING_METRIC_KEYS
+)
+
 PGD_METRIC_KEYS = {
     "pgd_accuracy",
     "pgd_attack_success_rate",
+    "pgd_map",
 }
 
 
@@ -74,12 +112,13 @@ class EvaluationMetadata:
     pgd_steps: Optional[int] = None
     random_start: Optional[bool] = None
     timestamp: Optional[str] = None
+    task_type: str = "classification"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> EvaluationMetadata:
         if not data or not isinstance(data, dict):
-            return cls(model_name="UnknownModel", dataset_name="", num_samples=0, epsilon=0.0)
+            return cls(model_name="UnknownModel", dataset_name="", num_samples=0, epsilon=0.0, task_type="classification")
 
         eps_raw = data.get("epsilon")
         eps = float(eps_raw) if eps_raw is not None and not isinstance(eps_raw, bool) else 0.0
@@ -93,6 +132,13 @@ class EvaluationMetadata:
         steps_raw = data.get("pgd_steps")
         steps = int(steps_raw) if steps_raw is not None and not isinstance(steps_raw, bool) else None
 
+        task_type_raw = data.get("task_type")
+        task_type = (
+            str(task_type_raw).strip().lower()
+            if task_type_raw is not None and not isinstance(task_type_raw, bool) and str(task_type_raw).strip()
+            else "classification"
+        )
+
         return cls(
             model_name=str(data.get("model_name", "UnknownModel")),
             dataset_name=str(data.get("dataset_name", "")),
@@ -102,6 +148,7 @@ class EvaluationMetadata:
             pgd_steps=steps,
             random_start=bool(data["random_start"]) if data.get("random_start") is not None else None,
             timestamp=data.get("timestamp"),
+            task_type=task_type,
             extra=data.get("extra", {}) if isinstance(data.get("extra"), dict) else {},
         )
 
@@ -175,6 +222,36 @@ class RegressionThresholds:
 
     max_worst_case_asr_increase: float = 3.0
     warn_worst_case_asr_increase: float = 1.0
+
+    # Image-tagging clean performance tolerances (drops in percentage points)
+    max_clean_map_drop: float = 3.0
+    warn_clean_map_drop: float = 1.0
+
+    max_clean_precision_drop: float = 3.0
+    warn_clean_precision_drop: float = 1.0
+
+    max_clean_recall_drop: float = 3.0
+    warn_clean_recall_drop: float = 1.0
+
+    max_clean_f1_drop: float = 3.0
+    warn_clean_f1_drop: float = 1.0
+
+    # Image-tagging robust accuracy/retention tolerances (drops in percentage points)
+    max_pgd_map_drop: float = 4.0
+    warn_pgd_map_drop: float = 1.5
+
+    max_fgsm_map_drop: float = 5.0
+    warn_fgsm_map_drop: float = 2.0
+
+    max_tag_retention_drop: float = 5.0
+    warn_tag_retention_drop: float = 2.0
+
+    # Image-tagging attack rate tolerances (surges in percentage points)
+    max_tag_drop_rate_increase: float = 5.0
+    warn_tag_drop_rate_increase: float = 2.0
+
+    max_tag_injection_rate_increase: float = 5.0
+    warn_tag_injection_rate_increase: float = 2.0
 
     # Policy switches
     enforce_condition_equality: bool = True
@@ -298,23 +375,54 @@ def validate_snapshot_integrity(
             if not isinstance(meta.alpha, (int, float)) or isinstance(meta.alpha, bool) or math.isnan(meta.alpha) or math.isinf(meta.alpha) or meta.alpha <= 0.0:
                 errors.append(f"{role_name} metadata 'alpha' must be a finite positive number, got {meta.alpha!r}.")
 
+        # Task type validation
+        task_type_val = (
+            meta.task_type.strip().lower()
+            if meta.task_type and isinstance(meta.task_type, str)
+            else "classification"
+        )
+        if task_type_val not in SUPPORTED_TASK_TYPES:
+            errors.append(
+                f"{role_name} metadata 'task_type' must be one of {sorted(SUPPORTED_TASK_TYPES)}, got {meta.task_type!r}."
+            )
+
     # Validate metrics presence
     metrics = snapshot_obj.metrics
     if not isinstance(metrics, dict) or len(metrics) == 0:
         errors.append(f"{role_name} snapshot contains no metrics dictionary or it is empty.")
         return False, errors, snapshot_obj
 
-    # 1. Require clean_accuracy
-    if "clean_accuracy" not in metrics:
-        errors.append(f"{role_name} snapshot is missing mandatory 'clean_accuracy' metric.")
+    task_type = (
+        meta.task_type.strip().lower()
+        if (meta and meta.task_type and isinstance(meta.task_type, str))
+        else "classification"
+    )
 
-    # 2. Require at least one adversarial metric
-    has_adv = any(k in metrics for k in ADVERSARIAL_METRIC_KEYS)
-    if not has_adv:
-        errors.append(
-            f"{role_name} snapshot must contain at least one adversarial metric among: "
-            f"{sorted(ADVERSARIAL_METRIC_KEYS)}."
-        )
+    if task_type == TaskType.IMAGE_TAGGING.value:
+        # 1. Require clean_map for image tagging
+        if "clean_map" not in metrics:
+            errors.append(f"{role_name} snapshot is missing mandatory 'clean_map' metric.")
+
+        # 2. Require at least one adversarial tagging metric
+        has_adv = any(k in metrics for k in ADVERSARIAL_TAGGING_METRIC_KEYS)
+        if not has_adv:
+            errors.append(
+                f"{role_name} snapshot must contain at least one adversarial metric among: "
+                f"{sorted(ADVERSARIAL_TAGGING_METRIC_KEYS)}."
+            )
+    else:
+        # Classification (default)
+        # 1. Require clean_accuracy
+        if "clean_accuracy" not in metrics:
+            errors.append(f"{role_name} snapshot is missing mandatory 'clean_accuracy' metric.")
+
+        # 2. Require at least one adversarial classification metric
+        has_adv = any(k in metrics for k in ADVERSARIAL_CLASSIFICATION_METRIC_KEYS)
+        if not has_adv:
+            errors.append(
+                f"{role_name} snapshot must contain at least one adversarial metric among: "
+                f"{sorted(ADVERSARIAL_CLASSIFICATION_METRIC_KEYS)}."
+            )
 
     # 3. Validate every metric value
     for key, value in metrics.items():
@@ -355,7 +463,17 @@ def validate_evaluation_conditions(
     and strictly compatible in both snapshots.
     """
     mismatches: List[str] = []
+
+    b_task = (base_meta.task_type or "classification").strip().lower()
+    c_task = (cand_meta.task_type or "classification").strip().lower()
+    matched_task = b_task == c_task
+
     audit: Dict[str, Any] = {
+        "task_type": {
+            "baseline": b_task,
+            "candidate": c_task,
+            "matched": matched_task,
+        },
         "dataset_name": {
             "baseline": base_meta.dataset_name,
             "candidate": cand_meta.dataset_name,
@@ -372,6 +490,12 @@ def validate_evaluation_conditions(
             "matched": abs(base_meta.epsilon - cand_meta.epsilon) <= thresholds.epsilon_tolerance,
         },
     }
+
+    if not audit["task_type"]["matched"]:
+        mismatches.append(
+            f"Task type mismatch: Baseline evaluated on task '{b_task}', "
+            f"Candidate evaluated on task '{c_task}'. Direct cross-task gating is not permitted."
+        )
 
     if not audit["dataset_name"]["matched"]:
         mismatches.append(
@@ -468,6 +592,7 @@ def compute_metric_deltas(
     passed: List[str] = []
 
     threshold_map = {
+        # Classification
         "clean_accuracy": (thresholds.warn_clean_accuracy_drop, thresholds.max_clean_accuracy_drop),
         "pgd_accuracy": (thresholds.warn_pgd_accuracy_drop, thresholds.max_pgd_accuracy_drop),
         "fgsm_accuracy": (thresholds.warn_fgsm_accuracy_drop, thresholds.max_fgsm_accuracy_drop),
@@ -477,6 +602,16 @@ def compute_metric_deltas(
             thresholds.warn_worst_case_asr_increase,
             thresholds.max_worst_case_asr_increase,
         ),
+        # Image tagging
+        "clean_map": (thresholds.warn_clean_map_drop, thresholds.max_clean_map_drop),
+        "clean_precision": (thresholds.warn_clean_precision_drop, thresholds.max_clean_precision_drop),
+        "clean_recall": (thresholds.warn_clean_recall_drop, thresholds.max_clean_recall_drop),
+        "clean_f1": (thresholds.warn_clean_f1_drop, thresholds.max_clean_f1_drop),
+        "pgd_map": (thresholds.warn_pgd_map_drop, thresholds.max_pgd_map_drop),
+        "fgsm_map": (thresholds.warn_fgsm_map_drop, thresholds.max_fgsm_map_drop),
+        "tag_retention_rate": (thresholds.warn_tag_retention_drop, thresholds.max_tag_retention_drop),
+        "tag_drop_rate": (thresholds.warn_tag_drop_rate_increase, thresholds.max_tag_drop_rate_increase),
+        "tag_injection_rate": (thresholds.warn_tag_injection_rate_increase, thresholds.max_tag_injection_rate_increase),
     }
 
     mutual_keys = [k for k in SUPPORTED_METRICS if k in baseline_metrics and k in candidate_metrics]
@@ -693,8 +828,9 @@ def evaluate_regression_gate(
         else:
             warnings.extend([f"Condition Compatibility Warning: {m}" for m in condition_mismatches])
     else:
+        task_str = f"Task: {base_snap.metadata.task_type}, " if base_snap.metadata.task_type != TaskType.CLASSIFICATION.value else ""
         passed_checks.append(
-            f"Evaluation conditions matched (Dataset: {base_snap.metadata.dataset_name}, "
+            f"Evaluation conditions matched ({task_str}Dataset: {base_snap.metadata.dataset_name}, "
             f"Samples: {base_snap.metadata.num_samples}, Epsilon: {base_snap.metadata.epsilon:.6f})"
         )
 
@@ -791,8 +927,8 @@ def export_gate_report_markdown(result: RegressionGateResult) -> str:
         f"**Evaluated At (UTC):** {result.timestamp}",
         "",
         "### Models & Conditions",
-        f"- **Baseline:** `{base_meta.get('model_name', 'Unknown')}` (Dataset: {base_meta.get('dataset_name')}, Samples: {base_meta.get('num_samples')}, ε={base_meta.get('epsilon', 0):.6f})",
-        f"- **Candidate:** `{cand_meta.get('model_name', 'Unknown')}` (Dataset: {cand_meta.get('dataset_name')}, Samples: {cand_meta.get('num_samples')}, ε={cand_meta.get('epsilon', 0):.6f})",
+        f"- **Baseline:** `{base_meta.get('model_name', 'Unknown')}` (Task: {base_meta.get('task_type', 'classification')}, Dataset: {base_meta.get('dataset_name')}, Samples: {base_meta.get('num_samples')}, ε={base_meta.get('epsilon', 0):.6f})",
+        f"- **Candidate:** `{cand_meta.get('model_name', 'Unknown')}` (Task: {cand_meta.get('task_type', 'classification')}, Dataset: {cand_meta.get('dataset_name')}, Samples: {cand_meta.get('num_samples')}, ε={cand_meta.get('epsilon', 0):.6f})",
         "",
         "### Metric Comparison Table",
         "| Metric | Baseline | Candidate | Delta | Status | Threshold |",

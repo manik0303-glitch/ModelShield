@@ -1,5 +1,7 @@
 import streamlit as st
+from pathlib import Path
 import torch
+import io
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -34,6 +36,19 @@ from evaluation.regression_gate import (
     export_gate_report_json,
     export_gate_report_markdown,
     validate_snapshot_integrity,
+)
+from model.checkpoint_loader import (
+    SupportedArchitecture,
+    load_checkpoint_safely,
+    load_baseline_model,
+    infer_architecture_from_state_dict,
+    clean_state_dict,
+)
+from evaluation.live_eval import (
+    evaluate_model_live,
+    is_snapshot_compatible_with_config,
+    run_live_regression_pipeline,
+    load_cifar10_samples,
 )
 
 
@@ -150,145 +165,427 @@ def snapshot_from_cifar_session(role: str = "Snapshot"):
 def render_regression_gate_workspace():
     st.header("⚖️ Model Security Regression Gate")
     st.write(
-        "Compare an evaluated Baseline model with a Candidate model under equivalent conditions. "
-        "Enforces configurable regression tolerances for clean accuracy, adversarial robustness, "
-        "and attack success rates, producing an authoritative PASS, WARN, or FAIL verdict."
+        "Evaluate and compare AI model checkpoints against CIFAR-10, verify evaluation condition "
+        "compatibility, detect performance and adversarial robustness regressions, and issue authoritative "
+        "PASS, WARN, or FAIL verdicts with structured reports."
     )
 
-    base_snap: EvaluationSnapshot | None = st.session_state.get("gate_baseline_snapshot")
-    cand_snap: EvaluationSnapshot | None = st.session_state.get("gate_candidate_snapshot")
+    tab_live, tab_manual = st.tabs([
+        "🚀 Live Model Evaluation",
+        "📁 Snapshot Comparison & JSON Upload",
+    ])
 
-    col_base, col_cand = st.columns(2)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    with col_base:
-        st.subheader("1. Baseline Snapshot")
-        if base_snap is not None:
-            st.success(f"**Loaded:** `{base_snap.metadata.model_name}`")
-            st.caption(
-                f"Dataset: **{base_snap.metadata.dataset_name}** ({base_snap.metadata.num_samples} samples) · "
-                f"ε: **{base_snap.metadata.epsilon:.6f}** · "
-                f"PGD steps: **{base_snap.metadata.pgd_steps}**"
+    # =========================================================================
+    # TAB 1: LIVE MODEL EVALUATION (STAGES 1 - 4)
+    # =========================================================================
+    with tab_live:
+        st.subheader("Live Model Upload & Genuine Robustness Evaluation")
+        st.write(
+            "Upload a new PyTorch model checkpoint (.pt or .pth) to automatically evaluate it on CIFAR-10 "
+            "alongside the baseline model. Generates standardized evaluation snapshots and computes "
+            "authoritative regression verdicts without requiring manual JSON creation."
+        )
+
+        st.markdown("---")
+        col_st1, col_st2 = st.columns(2)
+
+        # STAGE 1: SELECT BASELINE
+        with col_st1:
+            st.markdown("#### Stage 1 – Select Baseline Model")
+            base_option = st.radio(
+                "Baseline Model Source",
+                [
+                    "Carmon2019Unlabeled (Default CIFAR-10 Linf Baseline)",
+                    "Reuse Active / Saved Baseline Snapshot",
+                    "Upload Custom Baseline Checkpoint (.pt / .pth)",
+                ],
+                key="live_base_option",
             )
-            b_m = base_snap.metrics
-            st.write(
-                f"- Clean Acc: **{b_m.get('clean_accuracy', 0.0):.2f}%**\n"
-                f"- PGD Acc: **{b_m.get('pgd_accuracy', 0.0):.2f}%**\n"
-                f"- PGD ASR: **{b_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
-                f"- Worst-case ASR: **{b_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
-            )
-            if base_snap.trust_flag:
-                tf_status = base_snap.trust_flag.get("status", "UNKNOWN")
-                st.caption(f"Trust checks: **{tf_status}** ({base_snap.trust_flag.get('passed', 0)}/{base_snap.trust_flag.get('total', 0)})")
-            if base_snap.gradient_masking:
-                gm_status = base_snap.gradient_masking.get("status", "UNKNOWN")
-                st.caption(f"Gradient masking: **{gm_status}**")
 
-            b_btn_col1, b_btn_col2 = st.columns(2)
-            with b_btn_col1:
-                if st.button("Use Active Evaluation", key="btn_base_use_active"):
-                    snap = snapshot_from_cifar_session(role="Baseline")
-                    if snap is not None:
-                        st.session_state["gate_baseline_snapshot"] = snap
-                        st.session_state["gate_result"] = None
-                        st.rerun()
-                    else:
-                        st.warning("No completed CIFAR-10 evaluation in session state.")
-            with b_btn_col2:
-                if st.button("Clear Baseline", key="btn_base_clear"):
-                    st.session_state["gate_baseline_snapshot"] = None
-                    st.session_state["gate_result"] = None
-                    st.rerun()
-        else:
-            st.info("No baseline snapshot loaded.")
-            if st.session_state.get("cifar_eval_results") is not None:
-                if st.button("Use Active CIFAR-10 Evaluation", key="btn_base_set_active"):
-                    snap = snapshot_from_cifar_session(role="Baseline")
-                    if snap is not None:
-                        st.session_state["gate_baseline_snapshot"] = snap
+            baseline_model_loaded = None
+            baseline_arch_resolved = SupportedArchitecture.WIDERESNET_28_10_CARMON
+            baseline_name_resolved = "Carmon2019Unlabeled"
+
+            if base_option == "Carmon2019Unlabeled (Default CIFAR-10 Linf Baseline)":
+                carmon_path = "models/cifar10/Linf/Carmon2019Unlabeled.pt"
+                import os
+                if os.path.isfile(carmon_path):
+                    st.success("✅ Baseline checkpoint found on disk (`Carmon2019Unlabeled.pt`, 38.1M params).")
+                else:
+                    st.info("ℹ️ Baseline will be loaded via RobustBench / load_model().")
+                st.caption("Architecture: WideResNet-28-10 with sub_block1 · Dataset: CIFAR-10")
+
+            elif base_option == "Reuse Active / Saved Baseline Snapshot":
+                saved_base = st.session_state.get("gate_baseline_snapshot")
+                if saved_base is not None:
+                    st.success(f"✅ Loaded Snapshot: `{saved_base.metadata.model_name}`")
+                    st.caption(
+                        f"Samples: {saved_base.metadata.num_samples} · ε: {saved_base.metadata.epsilon:.6f} · "
+                        f"Clean: {saved_base.metrics.get('clean_accuracy', 0.0):.2f}% · PGD: {saved_base.metrics.get('pgd_accuracy', 0.0):.2f}%"
+                    )
+                else:
+                    st.warning("No baseline snapshot saved yet. Evaluate below or run CIFAR-10 evaluation first.")
+                    if st.session_state.get("cifar_eval_results") is not None:
+                        if st.button("Use Active CIFAR-10 Evaluation as Baseline", key="live_btn_use_cifar_base"):
+                            snap = snapshot_from_cifar_session(role="Baseline")
+                            if snap:
+                                st.session_state["gate_baseline_snapshot"] = snap
+                                st.rerun()
+
+            else:  # Custom baseline checkpoint
+                base_upload = st.file_uploader(
+                    "Upload Baseline Checkpoint (.pt, .pth)",
+                    type=["pt", "pth"],
+                    key="live_custom_base_upload",
+                )
+                if base_upload is not None:
+                    baseline_name_resolved = st.text_input("Baseline Model Name", value=Path(base_upload.name).stem, key="live_base_name_input")
+                    baseline_arch_resolved = st.selectbox(
+                        "Baseline Architecture",
+                        SupportedArchitecture.ALL,
+                        index=0,
+                        key="live_base_arch_select",
+                    )
+                    try:
+                        base_bytes = base_upload.getvalue()
+                        baseline_model_loaded, _, base_info = load_checkpoint_safely(
+                            io.BytesIO(base_bytes),
+                            architecture=baseline_arch_resolved,
+                            device=device,
+                        )
+                        st.success(f"Baseline checkpoint verified: {base_info['total_parameters']:,} parameters.")
+                    except Exception as exc:
+                        st.error(f"Failed to load baseline checkpoint: {exc}")
+
+        # STAGE 2: UPLOAD CANDIDATE
+        with col_st2:
+            st.markdown("#### Stage 2 – Upload Candidate Model")
+            cand_upload = st.file_uploader(
+                "Upload Candidate PyTorch Checkpoint (.pt, .pth)",
+                type=["pt", "pth"],
+                key="live_candidate_upload",
+            )
+
+            candidate_model_loaded = None
+            candidate_name_resolved = "CandidateModel"
+            candidate_arch_resolved = SupportedArchitecture.WIDERESNET_28_10_CARMON
+
+            if cand_upload is not None:
+                cand_bytes = cand_upload.getvalue()
+                inferred_arch = None
+                try:
+                    temp_raw = torch.load(io.BytesIO(cand_bytes), map_location="cpu", weights_only=False)
+                    if isinstance(temp_raw, dict):
+                        csd = clean_state_dict(temp_raw)
+                        inferred_arch = infer_architecture_from_state_dict(csd)
+                except Exception:
+                    pass
+
+                default_idx = 0
+                if inferred_arch and inferred_arch in SupportedArchitecture.ALL:
+                    default_idx = SupportedArchitecture.ALL.index(inferred_arch)
+                    st.info(f"💡 Detected architecture: **{inferred_arch}**")
+
+                candidate_name_resolved = st.text_input(
+                    "Candidate Model Name",
+                    value=Path(cand_upload.name).stem,
+                    key="live_cand_name_input",
+                )
+
+                candidate_arch_resolved = st.selectbox(
+                    "Confirm or Select Candidate Architecture",
+                    SupportedArchitecture.ALL,
+                    index=default_idx,
+                    key="live_cand_arch_select",
+                    help="Select the model architecture matching your checkpoint weights.",
+                )
+
+                # Validate checkpoint loading and forward pass
+                try:
+                    candidate_model_loaded, _, cand_info = load_checkpoint_safely(
+                        io.BytesIO(cand_bytes),
+                        architecture=candidate_arch_resolved,
+                        device=device,
+                    )
+                    st.success(
+                        f"✅ Candidate verified: **{cand_info['total_parameters']:,}** parameters. "
+                        f"Forward pass validated for CIFAR-10 shape (32×32)."
+                    )
+                except Exception as exc:
+                    candidate_model_loaded = None
+                    st.error(f"❌ Candidate verification failed: {exc}")
+            else:
+                st.info("Upload a candidate PyTorch checkpoint to enable live evaluation.")
+
+        # STAGE 3: CONFIGURE EVALUATION
+        st.markdown("---")
+        st.markdown("#### Stage 3 – Configure Evaluation Settings")
+        st.caption("Settings will be strictly applied to both Baseline and Candidate models for condition equality.")
+
+        cfg_c1, cfg_c2, cfg_c3, cfg_c4 = st.columns(4)
+        with cfg_c1:
+            st.selectbox("Dataset", ["CIFAR-10"], index=0, disabled=True, key="live_dataset_select")
+            live_samples = st.selectbox("Sample Count (Images)", [8, 16, 32, 64], index=1, key="live_samples_select")
+        with cfg_c2:
+            live_eps_pixels = st.slider("Attack Epsilon (pixels / 255)", 1, 16, 8, key="live_eps_slider")
+            live_epsilon = live_eps_pixels / 255.0
+            st.caption(f"ε = {live_epsilon:.6f}")
+        with cfg_c3:
+            live_pgd_steps = st.slider("PGD Iterations", 1, 20, 10, key="live_pgd_steps_slider")
+        with cfg_c4:
+            live_alpha = st.number_input(
+                "PGD Step Size (α)",
+                min_value=0.001,
+                max_value=0.1,
+                value=float(min(2 / 255.0, live_epsilon)),
+                step=0.001,
+                format="%.6f",
+                key="live_alpha_input",
+            )
+
+        # STAGE 4: RUN EVALUATION
+        st.markdown("---")
+        st.markdown("#### Stage 4 – Run Live Evaluation")
+
+        can_execute_live = candidate_model_loaded is not None or cand_upload is not None
+
+        if st.button("🚀 Evaluate Models & Run Security Gate", type="primary", key="btn_run_live_eval", disabled=not can_execute_live):
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            def update_progress(msg: str, frac: float):
+                status_text.text(f"⏳ {msg}")
+                progress_bar.progress(min(1.0, max(0.0, frac)))
+
+            try:
+                # 1. Resolve baseline model
+                b_model = None
+                existing_snap = None
+
+                if base_option == "Reuse Active / Saved Baseline Snapshot":
+                    existing_snap = st.session_state.get("gate_baseline_snapshot")
+                    if existing_snap is None:
+                        raise ValueError("No baseline snapshot available to reuse.")
+                elif base_option == "Upload Custom Baseline Checkpoint (.pt / .pth)":
+                    b_model = baseline_model_loaded
+                    if b_model is None:
+                        raise ValueError("Custom baseline model checkpoint was not loaded successfully.")
+                else:
+                    # Default Carmon2019
+                    update_progress("Loading Carmon2019Unlabeled baseline model...", 0.05)
+                    b_model, b_name, b_info = load_baseline_model(device=device)
+
+                # 2. Resolve candidate model
+                c_model = candidate_model_loaded
+                if c_model is None and cand_upload is not None:
+                    c_model, _, _ = load_checkpoint_safely(
+                        io.BytesIO(cand_upload.getvalue()),
+                        architecture=candidate_arch_resolved,
+                        device=device,
+                    )
+
+                if c_model is None:
+                    raise ValueError("Candidate model could not be loaded.")
+
+                # Thresholds for the gate
+                thresholds = RegressionThresholds(
+                    max_clean_accuracy_drop=float(st.session_state.get("th_m_clean", 2.0)),
+                    warn_clean_accuracy_drop=float(st.session_state.get("th_w_clean", 0.5)),
+                    max_pgd_accuracy_drop=float(st.session_state.get("th_m_pgd", 3.0)),
+                    warn_pgd_accuracy_drop=float(st.session_state.get("th_w_pgd", 1.0)),
+                    max_pgd_asr_increase=float(st.session_state.get("th_m_asr", 3.0)),
+                    warn_pgd_asr_increase=float(st.session_state.get("th_w_asr", 1.0)),
+                    enforce_condition_equality=bool(st.session_state.get("th_enforce_cond", True)),
+                    require_trust_checks_pass=bool(st.session_state.get("th_req_trust", True)),
+                    reject_gradient_masking=bool(st.session_state.get("th_rej_mask", True)),
+                )
+
+                # Run live pipeline
+                b_snap, c_snap, gate_res = run_live_regression_pipeline(
+                    baseline_model=b_model,
+                    candidate_model=c_model,
+                    baseline_name=baseline_name_resolved,
+                    candidate_name=candidate_name_resolved,
+                    candidate_architecture=candidate_arch_resolved,
+                    baseline_architecture=baseline_arch_resolved,
+                    existing_baseline_snapshot=existing_snap,
+                    dataset_name="CIFAR-10",
+                    n_samples=int(live_samples),
+                    epsilon=float(live_epsilon),
+                    alpha=float(live_alpha),
+                    pgd_steps=int(live_pgd_steps),
+                    thresholds=thresholds,
+                    device=device,
+                    progress_callback=update_progress,
+                )
+
+                st.session_state["gate_baseline_snapshot"] = b_snap
+                st.session_state["gate_candidate_snapshot"] = c_snap
+                st.session_state["gate_result"] = gate_res
+
+                progress_bar.progress(1.0)
+                status_text.text("✅ Live evaluation and regression gate completed successfully!")
+                st.success("🎉 Live evaluation complete! Scroll down to review comparative metrics and gate verdict.")
+
+            except Exception as exc:
+                status_text.empty()
+                progress_bar.empty()
+                st.error(f"Live evaluation failed: {exc}")
+
+    # =========================================================================
+    # TAB 2: MANUAL SNAPSHOT COMPARISON & JSON UPLOAD (PRESERVED)
+    # =========================================================================
+    with tab_manual:
+        st.subheader("Manual Evaluation Snapshots & JSON Upload")
+        st.write(
+            "Load existing evaluation snapshots from completed CIFAR-10 evaluation sessions or upload "
+            "standardized JSON snapshot files directly."
+        )
+
+        base_snap: EvaluationSnapshot | None = st.session_state.get("gate_baseline_snapshot")
+        cand_snap: EvaluationSnapshot | None = st.session_state.get("gate_candidate_snapshot")
+
+        col_base, col_cand = st.columns(2)
+
+        with col_base:
+            st.subheader("1. Baseline Snapshot")
+            if base_snap is not None:
+                st.success(f"**Loaded:** `{base_snap.metadata.model_name}`")
+                st.caption(
+                    f"Dataset: **{base_snap.metadata.dataset_name}** ({base_snap.metadata.num_samples} samples) · "
+                    f"ε: **{base_snap.metadata.epsilon:.6f}** · "
+                    f"PGD steps: **{base_snap.metadata.pgd_steps}**"
+                )
+                b_m = base_snap.metrics
+                st.write(
+                    f"- Clean Acc: **{b_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                    f"- PGD Acc: **{b_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                    f"- PGD ASR: **{b_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                    f"- Worst-case ASR: **{b_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+                )
+                if base_snap.trust_flag:
+                    tf_status = base_snap.trust_flag.get("status", "UNKNOWN")
+                    st.caption(f"Trust checks: **{tf_status}** ({base_snap.trust_flag.get('passed', 0)}/{base_snap.trust_flag.get('total', 0)})")
+                if base_snap.gradient_masking:
+                    gm_status = base_snap.gradient_masking.get("status", "UNKNOWN")
+                    st.caption(f"Gradient masking: **{gm_status}**")
+
+                b_btn_col1, b_btn_col2 = st.columns(2)
+                with b_btn_col1:
+                    if st.button("Use Active Evaluation", key="btn_base_use_active"):
+                        snap = snapshot_from_cifar_session(role="Baseline")
+                        if snap is not None:
+                            st.session_state["gate_baseline_snapshot"] = snap
+                            st.session_state["gate_result"] = None
+                            st.rerun()
+                        else:
+                            st.warning("No completed CIFAR-10 evaluation in session state.")
+                with b_btn_col2:
+                    if st.button("Clear Baseline", key="btn_base_clear"):
+                        st.session_state["gate_baseline_snapshot"] = None
                         st.session_state["gate_result"] = None
                         st.rerun()
             else:
-                st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
-
-        up_base = st.file_uploader("Upload Baseline JSON", type=["json"], key="upload_baseline_json")
-        if up_base is not None:
-            try:
-                data = json.load(up_base)
-                snap = EvaluationSnapshot.from_dict(data)
-                ok, errs, val_snap = validate_snapshot_integrity(snap, "Baseline")
-                if ok and val_snap:
-                    st.session_state["gate_baseline_snapshot"] = val_snap
-                    st.session_state["gate_result"] = None
-                    st.success("Baseline snapshot loaded from JSON.")
+                st.info("No baseline snapshot loaded.")
+                if st.session_state.get("cifar_eval_results") is not None:
+                    if st.button("Use Active CIFAR-10 Evaluation", key="btn_base_set_active"):
+                        snap = snapshot_from_cifar_session(role="Baseline")
+                        if snap is not None:
+                            st.session_state["gate_baseline_snapshot"] = snap
+                            st.session_state["gate_result"] = None
+                            st.rerun()
                 else:
-                    st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
-            except Exception as exc:
-                st.error(f"Failed to parse JSON file: {exc}")
+                    st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
 
-    with col_cand:
-        st.subheader("2. Candidate Snapshot")
-        if cand_snap is not None:
-            st.success(f"**Loaded:** `{cand_snap.metadata.model_name}`")
-            st.caption(
-                f"Dataset: **{cand_snap.metadata.dataset_name}** ({cand_snap.metadata.num_samples} samples) · "
-                f"ε: **{cand_snap.metadata.epsilon:.6f}** · "
-                f"PGD steps: **{cand_snap.metadata.pgd_steps}**"
-            )
-            c_m = cand_snap.metrics
-            st.write(
-                f"- Clean Acc: **{c_m.get('clean_accuracy', 0.0):.2f}%**\n"
-                f"- PGD Acc: **{c_m.get('pgd_accuracy', 0.0):.2f}%**\n"
-                f"- PGD ASR: **{c_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
-                f"- Worst-case ASR: **{c_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
-            )
-            if cand_snap.trust_flag:
-                tf_status = cand_snap.trust_flag.get("status", "UNKNOWN")
-                st.caption(f"Trust checks: **{tf_status}** ({cand_snap.trust_flag.get('passed', 0)}/{cand_snap.trust_flag.get('total', 0)})")
-            if cand_snap.gradient_masking:
-                gm_status = cand_snap.gradient_masking.get("status", "UNKNOWN")
-                st.caption(f"Gradient masking: **{gm_status}**")
-
-            c_btn_col1, c_btn_col2 = st.columns(2)
-            with c_btn_col1:
-                if st.button("Use Active Evaluation", key="btn_cand_use_active"):
-                    snap = snapshot_from_cifar_session(role="Candidate")
-                    if snap is not None:
-                        st.session_state["gate_candidate_snapshot"] = snap
+            up_base = st.file_uploader("Upload Baseline JSON", type=["json"], key="upload_baseline_json")
+            if up_base is not None:
+                try:
+                    data = json.load(up_base)
+                    snap = EvaluationSnapshot.from_dict(data)
+                    ok, errs, val_snap = validate_snapshot_integrity(snap, "Baseline")
+                    if ok and val_snap:
+                        st.session_state["gate_baseline_snapshot"] = val_snap
                         st.session_state["gate_result"] = None
-                        st.rerun()
+                        st.success("Baseline snapshot loaded from JSON.")
                     else:
-                        st.warning("No completed CIFAR-10 evaluation in session state.")
-            with c_btn_col2:
-                if st.button("Clear Candidate", key="btn_cand_clear"):
-                    st.session_state["gate_candidate_snapshot"] = None
-                    st.session_state["gate_result"] = None
-                    st.rerun()
-        else:
-            st.info("No candidate snapshot loaded.")
-            if st.session_state.get("cifar_eval_results") is not None:
-                if st.button("Use Active CIFAR-10 Evaluation", key="btn_cand_set_active"):
-                    snap = snapshot_from_cifar_session(role="Candidate")
-                    if snap is not None:
-                        st.session_state["gate_candidate_snapshot"] = snap
+                        st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
+                except Exception as exc:
+                    st.error(f"Failed to parse JSON file: {exc}")
+
+        with col_cand:
+            st.subheader("2. Candidate Snapshot")
+            if cand_snap is not None:
+                st.success(f"**Loaded:** `{cand_snap.metadata.model_name}`")
+                st.caption(
+                    f"Dataset: **{cand_snap.metadata.dataset_name}** ({cand_snap.metadata.num_samples} samples) · "
+                    f"ε: **{cand_snap.metadata.epsilon:.6f}** · "
+                    f"PGD steps: **{cand_snap.metadata.pgd_steps}**"
+                )
+                c_m = cand_snap.metrics
+                st.write(
+                    f"- Clean Acc: **{c_m.get('clean_accuracy', 0.0):.2f}%**\n"
+                    f"- PGD Acc: **{c_m.get('pgd_accuracy', 0.0):.2f}%**\n"
+                    f"- PGD ASR: **{c_m.get('pgd_attack_success_rate', 0.0):.2f}%**\n"
+                    f"- Worst-case ASR: **{c_m.get('worst_case_attack_success_rate', 0.0):.2f}%**"
+                )
+                if cand_snap.trust_flag:
+                    tf_status = cand_snap.trust_flag.get("status", "UNKNOWN")
+                    st.caption(f"Trust checks: **{tf_status}** ({cand_snap.trust_flag.get('passed', 0)}/{cand_snap.trust_flag.get('total', 0)})")
+                if cand_snap.gradient_masking:
+                    gm_status = cand_snap.gradient_masking.get("status", "UNKNOWN")
+                    st.caption(f"Gradient masking: **{gm_status}**")
+
+                c_btn_col1, c_btn_col2 = st.columns(2)
+                with c_btn_col1:
+                    if st.button("Use Active Evaluation", key="btn_cand_use_active"):
+                        snap = snapshot_from_cifar_session(role="Candidate")
+                        if snap is not None:
+                            st.session_state["gate_candidate_snapshot"] = snap
+                            st.session_state["gate_result"] = None
+                            st.rerun()
+                        else:
+                            st.warning("No completed CIFAR-10 evaluation in session state.")
+                with c_btn_col2:
+                    if st.button("Clear Candidate", key="btn_cand_clear"):
+                        st.session_state["gate_candidate_snapshot"] = None
                         st.session_state["gate_result"] = None
                         st.rerun()
             else:
-                st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
-
-        up_cand = st.file_uploader("Upload Candidate JSON", type=["json"], key="upload_candidate_json")
-        if up_cand is not None:
-            try:
-                data = json.load(up_cand)
-                snap = EvaluationSnapshot.from_dict(data)
-                ok, errs, val_snap = validate_snapshot_integrity(snap, "Candidate")
-                if ok and val_snap:
-                    st.session_state["gate_candidate_snapshot"] = val_snap
-                    st.session_state["gate_result"] = None
-                    st.success("Candidate snapshot loaded from JSON.")
+                st.info("No candidate snapshot loaded.")
+                if st.session_state.get("cifar_eval_results") is not None:
+                    if st.button("Use Active CIFAR-10 Evaluation", key="btn_cand_set_active"):
+                        snap = snapshot_from_cifar_session(role="Candidate")
+                        if snap is not None:
+                            st.session_state["gate_candidate_snapshot"] = snap
+                            st.session_state["gate_result"] = None
+                            st.rerun()
                 else:
-                    st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
-            except Exception as exc:
-                st.error(f"Failed to parse JSON file: {exc}")
+                    st.caption("Run an evaluation in *Test CIFAR-10 Dataset* or upload a JSON snapshot below.")
+
+            up_cand = st.file_uploader("Upload Candidate JSON", type=["json"], key="upload_candidate_json")
+            if up_cand is not None:
+                try:
+                    data = json.load(up_cand)
+                    snap = EvaluationSnapshot.from_dict(data)
+                    ok, errs, val_snap = validate_snapshot_integrity(snap, "Candidate")
+                    if ok and val_snap:
+                        st.session_state["gate_candidate_snapshot"] = val_snap
+                        st.session_state["gate_result"] = None
+                        st.success("Candidate snapshot loaded from JSON.")
+                    else:
+                        st.error(f"Invalid snapshot JSON: {'; '.join(errs)}")
+                except Exception as exc:
+                    st.error(f"Failed to parse JSON file: {exc}")
+
+    # =========================================================================
+    # RECONCILED RESULTS & STAGES 5 & 6 (COMMON TO BOTH TABS)
+    # =========================================================================
+    st.divider()
+
+    base_snap_curr: EvaluationSnapshot | None = st.session_state.get("gate_baseline_snapshot")
+    cand_snap_curr: EvaluationSnapshot | None = st.session_state.get("gate_candidate_snapshot")
 
     with st.expander("⚙️ Regression Gate Thresholds & Policies", expanded=False):
         st.write("Configure allowable performance shifts (all values in percentage points):")
@@ -323,11 +620,9 @@ def render_regression_gate_workspace():
         with p_c3:
             rej_mask = st.checkbox("Reject gradient masking WARNING", value=True, key="th_rej_mask", help="Rejects candidate if suspicious gradient masking signals are detected.")
 
-    can_run = base_snap is not None and cand_snap is not None
-    if not can_run:
-        st.info("Load both a Baseline and a Candidate snapshot above to run the regression gate.")
+    can_run = base_snap_curr is not None and cand_snap_curr is not None
 
-    if st.button("Run Security Regression Gate", type="primary", key="btn_run_gate", disabled=not can_run):
+    if st.button("Evaluate Gate on Loaded Snapshots", type="secondary", key="btn_run_gate", disabled=not can_run):
         thresholds = RegressionThresholds(
             max_clean_accuracy_drop=float(m_clean),
             warn_clean_accuracy_drop=float(w_clean),
@@ -341,16 +636,15 @@ def render_regression_gate_workspace():
         )
         try:
             with st.spinner("Evaluating security regression gate..."):
-                res = evaluate_regression_gate(base_snap, cand_snap, thresholds=thresholds)
+                res = evaluate_regression_gate(base_snap_curr, cand_snap_curr, thresholds=thresholds)
                 st.session_state["gate_result"] = res
         except Exception as exc:
             st.error(f"Regression gate execution failed: {exc}")
 
-    # Render results
+    # STAGE 5: COMPARE RESULTS
     res: RegressionGateResult | None = st.session_state.get("gate_result")
     if res is not None:
-        st.divider()
-        st.subheader("Gate Verdict")
+        st.markdown("### Stage 5 – Regression Comparison Results")
         if res.verdict == GateVerdict.PASS:
             st.success(f"### {res.verdict.value} ✅\n\n{res.summary}")
         elif res.verdict == GateVerdict.WARN:
@@ -404,10 +698,13 @@ def render_regression_gate_workspace():
                         })
                 st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
 
-        st.subheader("Export Gate Artifacts")
+        # STAGE 6: EXPORT REPORT
+        st.markdown("### Stage 6 – Export Evaluation Artifacts")
         json_report = export_gate_report_json(res)
         md_report = export_gate_report_markdown(res)
-        col_dl1, col_dl2 = st.columns(2)
+
+        col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
+
         with col_dl1:
             st.download_button(
                 "📥 Download JSON Gate Report",
@@ -424,6 +721,24 @@ def render_regression_gate_workspace():
                 mime="text/markdown",
                 key="dl_gate_md",
             )
+        with col_dl3:
+            if base_snap_curr:
+                st.download_button(
+                    "📥 Baseline Snapshot (JSON)",
+                    data=json.dumps(base_snap_curr.to_dict(), indent=2),
+                    file_name="baseline_evaluation_snapshot.json",
+                    mime="application/json",
+                    key="dl_base_snap_json",
+                )
+        with col_dl4:
+            if cand_snap_curr:
+                st.download_button(
+                    "📥 Candidate Snapshot (JSON)",
+                    data=json.dumps(cand_snap_curr.to_dict(), indent=2),
+                    file_name="candidate_evaluation_snapshot.json",
+                    mime="application/json",
+                    key="dl_cand_snap_json",
+                )
 
 
 # -------------------- HEADER / NAVIGATION --------------------

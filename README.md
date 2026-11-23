@@ -90,9 +90,10 @@ Access it at `http://localhost:8501` in your browser.
 
 All unit tests run **offline without any network access or model downloads**:
 
-### Regression Gate Test Suite (26 tests)
+### Regression Gate & Live Evaluation Test Suites
 ```bash
 python -m unittest evaluation.test_regression_gate -v
+python -m unittest evaluation.test_live_eval -v
 ```
 
 ### Trust Checks & Trust Flag Tests
@@ -105,13 +106,20 @@ python evaluation/test_trust_flag.py
 
 ## How to Use the Model Security Regression Gate
 
-1. Open the dashboard and navigate to **3. Test CIFAR-10 Dataset**.
-2. Run an evaluation on your baseline model, scroll to **⚖️ Model Security Regression Gate Snapshots**, and click **📌 Set as Regression Baseline**.
-3. Re-run an evaluation on your candidate model or defense configuration, and click **🎯 Set as Regression Candidate**.
-4. Switch to **⚖️ Model Security Regression Gate** from the sidebar navigation.
-5. Review the loaded snapshots, adjust regression tolerances in **⚙️ Regression Gate Thresholds & Policies** if desired, and click **Run Security Regression Gate**.
-6. Review the PASS/WARN/FAIL verdict, metric deltas table, and condition compatibility audit.
-7. Download the **JSON Report** or **Markdown Summary** using the export buttons.
+### Option A: Live Model Checkpoint Upload & Automatic Evaluation (Recommended)
+1. Open the dashboard and navigate to **⚖️ Model Security Regression Gate**.
+2. In the **🚀 Live Model Evaluation** tab:
+   - **Stage 1 (Select Baseline)**: Select the default `Carmon2019Unlabeled` baseline checkpoint (`models/cifar10/Linf/Carmon2019Unlabeled.pt`), reuse an active session snapshot, or upload a custom baseline checkpoint.
+   - **Stage 2 (Upload Candidate)**: Upload your candidate PyTorch checkpoint (`.pt` or `.pth`). ModelShield automatically infers or lets you select the model architecture (`WideResNet-28-10`, `WideResNet-34-10`, `ResNet-18`, `ResNet-50`, or custom).
+   - **Stage 3 (Configure Evaluation)**: Select CIFAR-10 test sample count, perturbation budget $\epsilon$, and PGD attack iterations.
+   - **Stage 4 (Run Evaluation)**: Click **🚀 Evaluate Models & Run Security Gate**.
+3. **Stage 5 (Compare Results)**: Review the PASS/WARN/FAIL verdict, comparative metric deltas, and condition compatibility audit.
+4. **Stage 6 (Export Artifacts)**: Download generated Baseline & Candidate JSON snapshots, full JSON gate report, and Markdown summary.
+
+### Option B: Snapshot Comparison & Manual JSON Upload
+1. Switch to the **📁 Snapshot Comparison & JSON Upload** tab.
+2. Load snapshots captured from the **Test CIFAR-10 Dataset** workspace or upload previously saved JSON evaluation snapshots.
+3. Configure regression thresholds and click **Evaluate Gate on Loaded Snapshots**.
 
 ---
 
