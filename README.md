@@ -1,6 +1,6 @@
 # ModelShield 🛡️
 
-An adversarial robustness evaluation platform for CIFAR-10 image classification models, featuring:
+An adversarial robustness evaluation platform for image-classification models, featuring attack testing, reliability checks, and security regression analysis:
 - FGSM and PGD adversarial attack generation
 - Dataset-level robustness evaluation
 - Gradient-masking diagnostic suite (new in this branch)
@@ -54,6 +54,12 @@ ModelShield/
 ├── model/
 │   ├── load_model.py                  # Loads Carmon2019Unlabeled via RobustBench
 │   └── dataset.py                     # CIFAR-10 data loading utilities
+├── backend/                          # FastAPI backend scaffold
+│   ├── app/
+│   ├── tests/
+│   └── requirements.txt
+├── docs/
+│   └── architecture.md
 ├── requirements.txt
 ├── ModelShield_Gradient_Masking_Implementation_Plan.md
 └── ModelShield_Simulated_Gradient_Masking_Implementation_Plan.md
@@ -137,3 +143,14 @@ evaluation/test_gradient_masking.py .......... [100%]
 - Croce, F., & Hein, M. (2020). [RobustBench](https://robustbench.github.io/).
 - Carmon, Y. et al. (2019). Unlabeled Data Improves Adversarial Robustness.
 
+## FastAPI Backend
+
+The backend scaffold has its own dependencies and can be run separately:
+
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
