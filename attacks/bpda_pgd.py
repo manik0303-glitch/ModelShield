@@ -7,10 +7,7 @@ BPDA (Athalye et al., ICML 2018) approximates the gradient through a
 non-differentiable transformation by replacing the true backward pass
 with a differentiable substitute (here: identity / straight-through).
 
-The forward pass uses the EXACT same transformation as standard attacks.
-Only the backward gradient computation uses the approximation.
-
-Threat model: Linf, same epsilon/alpha/steps convention as pgd_attack.
+Supports both single-label and multi-label (RAM++) objectives.
 """
 
 import torch
@@ -25,11 +22,6 @@ class _StraightThroughQuantize(torch.autograd.Function):
 
     Forward:  x -> round(x * (L-1)) / (L-1)   [hard quantization]
     Backward: passes upstream gradient unchanged (identity approximation)
-
-    LIMITATION: This is NOT the true derivative of rounding.
-    It is the BPDA straight-through approximation. Results should be
-    interpreted as an attack against an approximate gradient, not a
-    certified lower bound.
     """
 
     @staticmethod
@@ -41,8 +33,6 @@ class _StraightThroughQuantize(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        # Straight-through: pass gradient through unchanged
-        # Return gradient for x; None for levels (not a tensor)
         return grad_output, None
 
 
@@ -67,13 +57,12 @@ def bpda_pgd_attack(
     steps: int = 10,
     random_start: bool = True,
     random_seed: Optional[int] = None,
+    multi_label: bool = False,
 ) -> torch.Tensor:
     """
     PGD with BPDA straight-through approximation through hard quantization.
 
-    The forward path applies REAL quantization (same as standard attacks).
-    The backward path uses the straight-through estimator instead of the
-    true (zero/undefined) gradient of rounding.
+    Supports both single-label and multi-label loss computation.
 
     Returns adversarial images in [0, 1] that do NOT mutate `images`.
     """
@@ -107,7 +96,15 @@ def bpda_pgd_attack(
 
             model.zero_grad(set_to_none=True)
             outputs = model(adv_quantized)
-            loss_per_sample = F.cross_entropy(outputs, labels, reduction="none")
+
+            if multi_label:
+                # Per-sample loss mean across tags
+                loss_per_sample = F.binary_cross_entropy_with_logits(
+                    outputs, labels.float(), reduction="none"
+                ).mean(dim=-1)
+            else:
+                loss_per_sample = F.cross_entropy(outputs, labels.long(), reduction="none")
+
             loss = loss_per_sample.mean()
 
             grads = torch.autograd.grad(loss, adv, allow_unused=True)[0]
@@ -124,7 +121,12 @@ def bpda_pgd_attack(
             with torch.no_grad():
                 adv_q = straight_through_quantize(adv, levels=quantization_levels)
                 step_outputs = model(adv_q)
-                step_loss = F.cross_entropy(step_outputs, labels, reduction="none")
+                if multi_label:
+                    step_loss = F.binary_cross_entropy_with_logits(
+                        step_outputs, labels.float(), reduction="none"
+                    ).mean(dim=-1)
+                else:
+                    step_loss = F.cross_entropy(step_outputs, labels.long(), reduction="none")
                 improved = step_loss > best_loss
                 best_adv[improved] = adv[improved]
                 best_loss[improved] = step_loss[improved]
@@ -134,4 +136,3 @@ def bpda_pgd_attack(
             model.train()
 
     return best_adv.detach()
-

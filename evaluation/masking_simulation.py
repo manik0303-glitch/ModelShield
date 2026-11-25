@@ -7,16 +7,11 @@ Introduces a deliberate non-differentiable transformation (quantization)
 in a temporary pipeline and runs standard + BPDA attacks to produce
 evidence for the existing gradient-masking detector.
 
-Design invariants:
-  - Original model weights are never mutated.
-  - Original CIFAR-10 images and labels are never altered.
-  - The detector receives measured evidence only; simulation mode is
-    NOT passed into the detector's decision logic.
-  - All returned values are JSON-serializable (no tensors).
+Supports both single-label classification and multi-label (RAM++) pipelines.
 """
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 import torch
 import torch.nn as nn
@@ -28,14 +23,10 @@ from attacks.pgd import pgd_attack
 from evaluation.gradient_masking import analyze_gradient_masking
 
 
-# ---------------------------------------------------------------------------
-# Quantized pipeline wrapper
-# ---------------------------------------------------------------------------
-
 class _HardQuantizedPipeline(nn.Module):
     """
     Temporary, read-only wrapper that prepends hard quantization to the
-    base model's forward pass.  The base model is NOT mutated.
+    base model's forward pass. The base model is NOT mutated.
     """
 
     def __init__(self, base_model: nn.Module, levels: int):
@@ -48,10 +39,6 @@ class _HardQuantizedPipeline(nn.Module):
         return self.base_model(x_q)
 
 
-# ---------------------------------------------------------------------------
-# Helper: safe ASR
-# ---------------------------------------------------------------------------
-
 def _safe_asr(success_count: int, denominator: int) -> Optional[float]:
     if denominator == 0:
         return None
@@ -59,7 +46,6 @@ def _safe_asr(success_count: int, denominator: int) -> Optional[float]:
 
 
 def _safe_float(val: Any) -> Optional[float]:
-    """Convert tensor or numeric to Python float, None on failure."""
     if val is None:
         return None
     try:
@@ -71,20 +57,16 @@ def _safe_float(val: Any) -> Optional[float]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Smoke-check helpers
-# ---------------------------------------------------------------------------
-
 def _smoke_check_pipeline(
     pipeline: nn.Module,
     images: torch.Tensor,
     labels: torch.Tensor,
     levels: int,
     epsilon: float,
+    multi_label: bool = False,
 ) -> Dict[str, Any]:
     """
     Validates the quantized pipeline before any attack runs.
-    Returns a dict with 'passed' bool and list of 'errors'.
     """
     errors: List[str] = []
 
@@ -109,7 +91,7 @@ def _smoke_check_pipeline(
         errors.append("Non-finite values in quantized tensor.")
 
     # Hard quantization must change at least some grid-misaligned inputs
-    mid = 0.5 / (levels - 1)          # a value not on the quantization grid
+    mid = 0.5 / (levels - 1)
     test_val = torch.full_like(images[:1], mid)
     q_val = torch.round(test_val * (levels - 1)) / (levels - 1)
     if (test_val - q_val).abs().max().item() < 1e-9:
@@ -118,7 +100,11 @@ def _smoke_check_pipeline(
     # Ordinary gradient through hard quantization must be near zero
     x_for_grad = images[:2].clone().detach().requires_grad_(True)
     try:
-        loss_g = F.cross_entropy(pipeline(x_for_grad), labels[:2])
+        out_g = pipeline(x_for_grad)
+        if multi_label:
+            loss_g = F.binary_cross_entropy_with_logits(out_g, labels[:2].float())
+        else:
+            loss_g = F.cross_entropy(out_g, labels[:2].long())
         grads = torch.autograd.grad(loss_g, x_for_grad, allow_unused=True)[0]
     except Exception as exc:
         grads = None
@@ -134,7 +120,10 @@ def _smoke_check_pipeline(
     try:
         x_bq = straight_through_quantize(x_bpda, levels)
         out_b = pipeline.base_model(x_bq)
-        loss_b = F.cross_entropy(out_b, labels[:2])
+        if multi_label:
+            loss_b = F.binary_cross_entropy_with_logits(out_b, labels[:2].float())
+        else:
+            loss_b = F.cross_entropy(out_b, labels[:2].long())
         bpda_grads = torch.autograd.grad(loss_b, x_bpda, allow_unused=True)[0]
     except Exception as exc:
         bpda_grads = None
@@ -150,20 +139,19 @@ def _smoke_check_pipeline(
     return {"passed": len(errors) == 0, "errors": errors}
 
 
-# ---------------------------------------------------------------------------
-# Gradient comparison helpers
-# ---------------------------------------------------------------------------
-
 def _measure_ordinary_gradient_stats(
     pipeline: nn.Module,
     images: torch.Tensor,
     labels: torch.Tensor,
+    multi_label: bool = False,
 ) -> Dict[str, Any]:
-    """Measures gradient statistics through the hard-quantized pipeline."""
     x_in = images.clone().detach().requires_grad_(True)
     try:
         out = pipeline(x_in)
-        loss = F.cross_entropy(out, labels)
+        if multi_label:
+            loss = F.binary_cross_entropy_with_logits(out, labels.float())
+        else:
+            loss = F.cross_entropy(out, labels.long())
         grads = torch.autograd.grad(loss, x_in, allow_unused=True)[0]
     except Exception:
         return {"norm": None, "near_zero_fraction": None, "finite": False}
@@ -183,13 +171,16 @@ def _measure_bpda_gradient_stats(
     images: torch.Tensor,
     labels: torch.Tensor,
     levels: int,
+    multi_label: bool = False,
 ) -> Dict[str, Any]:
-    """Measures gradient statistics through the BPDA (straight-through) path."""
     x_in = images.clone().detach().requires_grad_(True)
     try:
         x_q = straight_through_quantize(x_in, levels)
         out = base_model(x_q)
-        loss = F.cross_entropy(out, labels)
+        if multi_label:
+            loss = F.binary_cross_entropy_with_logits(out, labels.float())
+        else:
+            loss = F.cross_entropy(out, labels.long())
         grads = torch.autograd.grad(loss, x_in, allow_unused=True)[0]
     except Exception:
         return {"norm": None, "near_zero_fraction": None, "finite": False}
@@ -204,10 +195,6 @@ def _measure_bpda_gradient_stats(
     }
 
 
-# ---------------------------------------------------------------------------
-# Simulation validator
-# ---------------------------------------------------------------------------
-
 def _run_simulation_validator(
     smoke_ok: bool,
     smoke_errors: List[str],
@@ -221,27 +208,18 @@ def _run_simulation_validator(
     bpda_advantage_margin: float = 5.0,
     min_eligible: int = 2,
 ) -> Dict[str, Any]:
-    """
-    Independent validation of the controlled experiment's setup.
-    Uses the known simulation configuration to assess whether the
-    intended gradient-masking condition was established.
-    Does NOT set the detector verdict.
-    """
     checks = []
     all_passed = True
 
-    # Check 1: Hard quantization was active
     c1_pass = smoke_ok
     checks.append({
         "name": "hard_quantization_active",
         "passed": c1_pass,
-        "details": "Pipeline smoke checks passed." if c1_pass else
-                   f"Smoke check failures: {'; '.join(smoke_errors)}",
+        "details": "Pipeline smoke checks passed." if c1_pass else f"Smoke check failures: {'; '.join(smoke_errors)}",
     })
     if not c1_pass:
         all_passed = False
 
-    # Check 2: Ordinary gradient was obscured
     ord_norm = ord_grad_stats.get("norm")
     ord_nz = ord_grad_stats.get("near_zero_fraction")
     c2_pass = (
@@ -261,7 +239,6 @@ def _run_simulation_validator(
     if not c2_pass:
         all_passed = False
 
-    # Check 3: BPDA gradients are finite and usable
     bpda_finite = bpda_grad_stats.get("finite", False)
     bpda_nz = bpda_grad_stats.get("near_zero_fraction", 1.0)
     c3_pass = bpda_finite and (bpda_nz is None or bpda_nz < 0.9)
@@ -276,7 +253,6 @@ def _run_simulation_validator(
     if not c3_pass:
         all_passed = False
 
-    # Check 4: Clean accuracy acceptable
     c4_pass = (sim_clean_acc is not None and sim_clean_acc > 0.0 and eligible_count >= min_eligible)
     checks.append({
         "name": "clean_accuracy_acceptable",
@@ -290,7 +266,6 @@ def _run_simulation_validator(
     if not c4_pass:
         all_passed = False
 
-    # Check 5: BPDA attack advantage over standard PGD
     if bpda_asr is None or pgd_asr is None:
         c5_pass = False
         c5_detail = "One or more ASRs are undefined; advantage cannot be assessed."
@@ -310,7 +285,6 @@ def _run_simulation_validator(
     if not c5_pass:
         all_passed = False
 
-    # Determine overall validation status
     if not smoke_ok or not bpda_grad_stats.get("finite", False):
         status = "ERROR"
         summary = "Simulation infrastructure failed; results cannot be trusted."
@@ -341,10 +315,6 @@ def _run_simulation_validator(
     }
 
 
-# ---------------------------------------------------------------------------
-# Main simulation runner
-# ---------------------------------------------------------------------------
-
 def run_masking_simulation(
     model: nn.Module,
     images: torch.Tensor,
@@ -357,24 +327,17 @@ def run_masking_simulation(
     random_seed: int = 123,
     bpda_advantage_margin: float = 5.0,
     min_eligible: int = 2,
-) -> Dict[str, Any]:
+    multi_label: bool = False,
+    threshold: Union[float, torch.Tensor] = 0.68,
+    return_tensors: bool = False,
+) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, torch.Tensor]]]:
     """
     Orchestrates the full controlled gradient-masking simulation.
-
-    Returns a JSON-serializable result dictionary containing:
-      - simulation_validation: VALIDATED / INCONCLUSIVE / CONDITION_NOT_DEMONSTRATED / ERROR
-      - detector_result: existing gradient_masking detector output (unmodified)
-      - measurements: clean accuracy, gradient stats, attack ASRs
-      - configuration: experiment settings
-      - limitations: scientific caveats
-
-    The detector receives measured evidence only; simulation mode is NOT
-    passed into its decision logic.
+    Supports both single-label and multi-label models.
     """
     device = images.device
     model.eval()
 
-    # Cap sample count
     n = min(images.shape[0], sample_cap)
     imgs = images[:n].clone().detach()
     lbls = labels[:n].clone().detach()
@@ -388,10 +351,11 @@ def run_masking_simulation(
         "random_seed": random_seed,
         "bpda_advantage_margin_pp": bpda_advantage_margin,
         "min_eligible_samples": min_eligible,
+        "multi_label": multi_label,
     }
 
-    def _inconclusive(reason: str) -> Dict[str, Any]:
-        return {
+    def _inconclusive(reason: str) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, torch.Tensor]]]:
+        payload = {
             "mode": "simulated_gradient_masking",
             "simulation_validation": {
                 "status": "INCONCLUSIVE",
@@ -423,16 +387,34 @@ def run_masking_simulation(
                 reason,
             ],
         }
+        if return_tensors:
+            empty_bundle = {
+                "clean_images": imgs.detach().cpu(),
+                "pgd_images": imgs.detach().cpu(),
+                "bpda_images": imgs.detach().cpu(),
+            }
+            return payload, empty_bundle
+        return payload
 
     # Phase A: Capture original clean accuracy
     with torch.no_grad():
-        orig_preds = model(imgs).argmax(dim=1)
-    orig_clean_correct = orig_preds.eq(lbls)
+        orig_out = model(imgs)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(orig_out.device)
+            orig_preds = (orig_out.sigmoid() > thresh).long()
+            # For open-vocabulary multi-label without ground truth annotations,
+            # we consider a sample eligible if at least one tag is recognized with confidence
+            orig_clean_correct = (orig_preds.sum(dim=1) > 0)
+        else:
+            orig_preds = orig_out.argmax(dim=1)
+            orig_clean_correct = orig_preds.eq(lbls.long())
     orig_clean_acc = _safe_float(100.0 * orig_clean_correct.float().mean().item())
 
     # Phase B: Build and validate simulated pipeline
     sim_pipeline = _HardQuantizedPipeline(model, levels=quantization_levels)
-    smoke_result = _smoke_check_pipeline(sim_pipeline, imgs, lbls, quantization_levels, epsilon)
+    smoke_result = _smoke_check_pipeline(
+        sim_pipeline, imgs, lbls, quantization_levels, epsilon, multi_label=multi_label
+    )
 
     if not smoke_result["passed"]:
         return _inconclusive(
@@ -441,8 +423,15 @@ def run_masking_simulation(
 
     # Phase C: Measure simulated clean accuracy
     with torch.no_grad():
-        sim_preds = sim_pipeline(imgs).argmax(dim=1)
-    sim_clean_correct = sim_preds.eq(lbls)
+        sim_out = sim_pipeline(imgs)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(sim_out.device)
+            sim_preds = (sim_out.sigmoid() > thresh).long()
+            sim_clean_correct = (sim_preds.sum(dim=1) > 0)
+        else:
+            sim_preds = sim_out.argmax(dim=1)
+            sim_clean_correct = sim_preds.eq(lbls.long())
+
     sim_clean_acc = _safe_float(100.0 * sim_clean_correct.float().mean().item())
     clean_acc_drop = (
         _safe_float(orig_clean_acc - sim_clean_acc)
@@ -458,34 +447,47 @@ def run_masking_simulation(
         )
 
     # Gradient comparison
-    ord_grad_stats = _measure_ordinary_gradient_stats(sim_pipeline, imgs, lbls)
-    bpda_grad_stats = _measure_bpda_gradient_stats(model, imgs, lbls, quantization_levels)
+    ord_grad_stats = _measure_ordinary_gradient_stats(sim_pipeline, imgs, lbls, multi_label=multi_label)
+    bpda_grad_stats = _measure_bpda_gradient_stats(model, imgs, lbls, quantization_levels, multi_label=multi_label)
 
     # Phase D: Run attacks
     torch.manual_seed(random_seed)
 
-    # FGSM through hard-quantized pipeline
-    fgsm_adv = fgsm_attack(sim_pipeline, imgs, lbls, epsilon=epsilon)
+    # FGSM
+    fgsm_adv = fgsm_attack(sim_pipeline, imgs, lbls, epsilon=epsilon, multi_label=multi_label)
     with torch.no_grad():
-        fgsm_preds = sim_pipeline(fgsm_adv).argmax(dim=1)
-    fgsm_correct = fgsm_preds.eq(lbls)
+        f_out = sim_pipeline(fgsm_adv)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(f_out.device)
+            fgsm_preds = (f_out.sigmoid() > thresh).long()
+            # In multi-label, fooled means at least one detected tag was wiped or flipped
+            fgsm_correct = (fgsm_preds == sim_preds).all(dim=1)
+        else:
+            fgsm_preds = f_out.argmax(dim=1)
+            fgsm_correct = fgsm_preds.eq(lbls.long())
     fgsm_fooled = sim_clean_correct & ~fgsm_correct
     fgsm_success = int(fgsm_fooled.sum().item())
     fgsm_asr = _safe_asr(fgsm_success, eligible_count)
 
-    # Standard PGD through hard-quantized pipeline
+    # Standard PGD (gradient masked through quantization)
     pgd_adv = pgd_attack(
         sim_pipeline, imgs, lbls,
-        epsilon=epsilon, alpha=alpha, steps=pgd_steps, random_start=True,
+        epsilon=epsilon, alpha=alpha, steps=pgd_steps, random_start=False, multi_label=multi_label,
     )
     with torch.no_grad():
-        pgd_preds = sim_pipeline(pgd_adv).argmax(dim=1)
-    pgd_correct = pgd_preds.eq(lbls)
+        p_out = sim_pipeline(pgd_adv)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(p_out.device)
+            pgd_preds = (p_out.sigmoid() > thresh).long()
+            pgd_correct = (pgd_preds == sim_preds).all(dim=1)
+        else:
+            pgd_preds = p_out.argmax(dim=1)
+            pgd_correct = pgd_preds.eq(lbls.long())
     pgd_fooled = sim_clean_correct & ~pgd_correct
     pgd_success = int(pgd_fooled.sum().item())
     pgd_asr = _safe_asr(pgd_success, eligible_count)
 
-    # BPDA-assisted PGD
+    # BPDA-assisted PGD (adaptive bypass)
     bpda_adv = bpda_pgd_attack(
         model=model,
         images=imgs,
@@ -494,16 +496,54 @@ def run_masking_simulation(
         epsilon=epsilon,
         alpha=alpha,
         steps=pgd_steps,
-        random_start=True,
+        random_start=False,
         random_seed=random_seed,
+        multi_label=multi_label,
     )
     with torch.no_grad():
-        # Evaluate BPDA adversarials through the SAME hard-quantized pipeline
-        bpda_preds = sim_pipeline(bpda_adv).argmax(dim=1)
-    bpda_correct = bpda_preds.eq(lbls)
+        b_out = sim_pipeline(bpda_adv)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(b_out.device)
+            bpda_preds = (b_out.sigmoid() > thresh).long()
+            bpda_correct = (bpda_preds == sim_preds).all(dim=1)
+        else:
+            bpda_preds = b_out.argmax(dim=1)
+            bpda_correct = bpda_preds.eq(lbls.long())
     bpda_fooled = sim_clean_correct & ~bpda_correct
     bpda_success = int(bpda_fooled.sum().item())
     bpda_asr = _safe_asr(bpda_success, eligible_count)
+
+    # Trust attestation check
+    from evaluation.trust_checks import get_trust_attestation_summary
+    attestation = get_trust_attestation_summary(
+        original_images=imgs,
+        adversarial_images=bpda_adv,
+        outputs=b_out,
+        labels=lbls,
+        epsilon=epsilon,
+    )
+
+    # Per-sample audit telemetry
+    sample_audits = []
+    for idx in range(min(n, 8)):
+        clean_match = bool(sim_clean_correct[idx].item()) if idx < len(sim_clean_correct) else False
+        pgd_fool = bool(pgd_fooled[idx].item()) if idx < len(pgd_fooled) else False
+        bpda_fool = bool(bpda_fooled[idx].item()) if idx < len(bpda_fooled) else False
+        
+        # Max Linf perturbation on this specific sample
+        max_linf = float((bpda_adv[idx] - imgs[idx]).abs().max().item())
+
+        sample_audits.append({
+            "sample_index": idx,
+            "clean_preds_bin": sim_preds[idx].detach().cpu().tolist() if multi_label else int(sim_preds[idx].item()),
+            "pgd_preds_bin": pgd_preds[idx].detach().cpu().tolist() if multi_label else int(pgd_preds[idx].item()),
+            "bpda_preds_bin": bpda_preds[idx].detach().cpu().tolist() if multi_label else int(bpda_preds[idx].item()),
+            "target_labels_bin": lbls[idx].detach().cpu().tolist() if multi_label else int(lbls[idx].item()),
+            "clean_correct": clean_match,
+            "pgd_fooled": pgd_fool,
+            "bpda_fooled": bpda_fool,
+            "max_linf": round(max_linf, 5),
+        })
 
     measurements = {
         "sample_count": n,
@@ -534,10 +574,18 @@ def run_masking_simulation(
             "bpda_gradient_norm": bpda_grad_stats.get("norm"),
             "bpda_gradient_finite": bpda_grad_stats.get("finite", False),
         },
+        "trust_attestation": attestation,
+        "sample_audits": sample_audits,
     }
 
-    # Phase E: Run the existing detector on the simulated pipeline
-    # The detector receives only measured inputs — NOT the simulation mode flag.
+    # Internal reference to tensors for interactive UI rendering (not in serializable measurements dict)
+    tensors_bundle = {
+        "clean_images": imgs.detach().cpu(),
+        "pgd_images": pgd_adv.detach().cpu(),
+        "bpda_images": bpda_adv.detach().cpu(),
+    }
+
+    # Phase E: Run detector
     try:
         detector_result = analyze_gradient_masking(
             model=sim_pipeline,
@@ -551,6 +599,9 @@ def run_masking_simulation(
             baseline_fgsm_asr=fgsm_asr,
             run_random_search=False,
             max_diagnostic_samples=n,
+            multi_label=multi_label,
+            threshold=threshold,
+            fast_mode=True,
         )
     except Exception as exc:
         detector_result = {
@@ -561,7 +612,7 @@ def run_masking_simulation(
             "actionable_guidance": [],
         }
 
-    # Phase F: Independent simulation validator
+    # Phase F: Validator
     sim_validation = _run_simulation_validator(
         smoke_ok=smoke_result["passed"],
         smoke_errors=smoke_result.get("errors", []),
@@ -576,7 +627,7 @@ def run_masking_simulation(
         min_eligible=min_eligible,
     )
 
-    return {
+    result_payload = {
         "mode": "simulated_gradient_masking",
         "simulation_validation": sim_validation,
         "detector_result": detector_result,
@@ -589,3 +640,6 @@ def run_masking_simulation(
         ],
     }
 
+    if return_tensors:
+        return result_payload, tensors_bundle
+    return result_payload

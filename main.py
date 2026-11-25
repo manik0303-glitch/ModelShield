@@ -2,12 +2,12 @@ from model.load_model import load_model
 
 
 def main():
-    model, weights, device = load_model()
+    model, device, tag_list, class_threshold, transform = load_model()
 
-    print("Model loaded successfully!")
+    print("RAM++ Model loaded successfully!")
     print("Model:", model.__class__.__name__)
     print("Device:", device)
-    print("Number of classes:", len(weights.meta["categories"]))
+    print("Number of tags recognized:", len(tag_list))
 
 
 if __name__ == "__main__":

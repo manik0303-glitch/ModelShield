@@ -9,16 +9,21 @@ from attacks.fgsm import fgsm_attack
 from attacks.pgd import pgd_attack
 
 
-def calculate_accuracy(model, images, labels, defense):
+def calculate_accuracy(model, images, labels, defense, multi_label=False, threshold=0.68):
     """Calculate model accuracy after applying a defense."""
 
     defended_images = defense(images)
 
     with torch.no_grad():
         outputs = model(defended_images)
-        predictions = outputs.argmax(dim=1)
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(outputs.device)
+            predictions = (outputs.sigmoid() > thresh).long()
+            correct = (predictions == labels.long()).all(dim=1).sum().item()
+        else:
+            predictions = outputs.argmax(dim=1)
+            correct = (predictions == labels.long()).sum().item()
 
-    correct = (predictions == labels).sum().item()
     accuracy = 100.0 * correct / len(labels)
 
     return accuracy, predictions
@@ -28,15 +33,19 @@ def calculate_attack_success(
     clean_predictions,
     adversarial_predictions,
     labels,
+    multi_label=False,
 ):
     """Calculate attack success among initially correct examples."""
 
-    initially_correct = clean_predictions == labels
-
-    fooled = (
-        initially_correct
-        & (adversarial_predictions != labels)
-    )
+    if multi_label:
+        initially_correct = (clean_predictions == labels.long()).all(dim=1)
+        fooled = initially_correct & (adversarial_predictions != labels.long()).any(dim=1)
+    else:
+        initially_correct = clean_predictions == labels
+        fooled = (
+            initially_correct
+            & (adversarial_predictions != labels)
+        )
 
     denominator = initially_correct.sum().item()
 
@@ -53,13 +62,11 @@ def evaluate_defense(
     epsilon=8 / 255,
     pgd_steps=10,
     quantization_levels=16,
+    multi_label=False,
+    threshold=0.68,
 ):
     """
     Compare the original pipeline with input quantization.
-
-    Note: The initial attack examples are generated against
-    the original model. This is a preliminary evaluation,
-    not a robustness certification.
     """
 
     model.eval()
@@ -74,10 +81,13 @@ def evaluate_defense(
 
     with torch.no_grad():
         clean_outputs = model(images)
-        clean_predictions = clean_outputs.argmax(dim=1)
-
-    # Use the model's clean predictions as attack reference labels.
-    attack_labels = clean_predictions.detach()
+        if multi_label:
+            thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(clean_outputs.device)
+            clean_predictions = (clean_outputs.sigmoid() > thresh).long()
+            attack_labels = clean_predictions.detach().float()
+        else:
+            clean_predictions = clean_outputs.argmax(dim=1)
+            attack_labels = clean_predictions.detach()
 
     # Generate adversarial examples against the original model.
     fgsm_images = fgsm_attack(
@@ -85,6 +95,7 @@ def evaluate_defense(
         images,
         attack_labels,
         epsilon=epsilon,
+        multi_label=multi_label,
     )
 
     pgd_images = pgd_attack(
@@ -95,6 +106,7 @@ def evaluate_defense(
         alpha=min(2 / 255, epsilon),
         steps=pgd_steps,
         random_start=True,
+        multi_label=multi_label,
     )
 
     results = {}
@@ -106,6 +118,8 @@ def evaluate_defense(
             images,
             labels,
             defense,
+            multi_label=multi_label,
+            threshold=threshold,
         )
 
         fgsm_accuracy, fgsm_preds = calculate_accuracy(
@@ -113,6 +127,8 @@ def evaluate_defense(
             fgsm_images,
             labels,
             defense,
+            multi_label=multi_label,
+            threshold=threshold,
         )
 
         pgd_accuracy, pgd_preds = calculate_accuracy(
@@ -120,18 +136,22 @@ def evaluate_defense(
             pgd_images,
             labels,
             defense,
+            multi_label=multi_label,
+            threshold=threshold,
         )
 
         fgsm_asr = calculate_attack_success(
             clean_preds,
             fgsm_preds,
             labels,
+            multi_label=multi_label,
         )
 
         pgd_asr = calculate_attack_success(
             clean_preds,
             pgd_preds,
             labels,
+            multi_label=multi_label,
         )
 
         results[name] = {
