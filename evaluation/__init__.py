@@ -28,6 +28,18 @@ from evaluation.live_eval import (
     is_snapshot_compatible_with_config,
     run_live_regression_pipeline,
 )
+from evaluation.semantic_consistency import (
+    SemanticConsistencyResult,
+    compare_tag_sets,
+    evaluate_semantic_consistency_images,
+    evaluate_semantic_regression,
+)
+from evaluation.ram_eval import (
+    ensure_benchmark_dataset,
+    load_dataset_images,
+    evaluate_ram_model_live,
+    run_live_ram_regression_pipeline,
+)
 
 __all__ = [
     "GateVerdict",
@@ -52,4 +64,12 @@ __all__ = [
     "evaluate_model_live",
     "is_snapshot_compatible_with_config",
     "run_live_regression_pipeline",
+    "SemanticConsistencyResult",
+    "compare_tag_sets",
+    "evaluate_semantic_consistency_images",
+    "evaluate_semantic_regression",
+    "ensure_benchmark_dataset",
+    "load_dataset_images",
+    "evaluate_ram_model_live",
+    "run_live_ram_regression_pipeline",
 ]

@@ -154,6 +154,8 @@ def evaluate_model_live(
         pgd_steps=int(pgd_steps),
         random_start=bool(random_start),
         timestamp=datetime.now(timezone.utc).isoformat(),
+        task_type="classification",
+        architecture=str(architecture),
         extra={
             "architecture": str(architecture),
             "device": str(target_device),
