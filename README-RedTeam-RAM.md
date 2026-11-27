@@ -1,44 +1,50 @@
-﻿# RAM++ Red-Team Orchestrator
+﻿# ModelShield - RAM++ Adaptive Red-Team Orchestrator
 
-## Contribution
+## Overview
 
-- RAM++ multi-label recognition interface
+The Adaptive Red-Team Orchestrator is a component of
+the ModelShield semester project, supporting robustness
+evaluation of RAM++ Swin-L image-tagging models.
+
+## Contributions
+
+- Interactive Streamlit investigation dashboard
+- RAM++ multi-label model integration
+- Adaptive evaluation orchestration
+- Preflight validation and integrity checks
 - Neural network activation visualizations
-- Tag retention and tag-score reporting
-- Interactive investigation dashboard
-- Mission audit export and replay
+- Tag preservation and score comparison
 - Investigation Copilot
+- Audit reporting and replay
 
-## Runtime requirements
+## Runtime Requirements
 
 - Python 3.11
 - PyTorch and torchvision
 - Streamlit
 - Plotly
-- pandas, NumPy and Pillow
-- Compatible RAM++ installation and pretrained checkpoint
+- NumPy, pandas and Pillow
+- Compatible RAM++ upstream installation
+- RAM++ pretrained checkpoint
 
-## Integration status
+Model weights and virtual environments are maintained
+separately and are not committed to this branch.
 
-The frontend and reporting components are published.
-Mission backend and shared RAM++ dependency integration
-require compatibility review before standalone execution.
+## Verification Status
 
-## Scientific limitations
+- Source-code integration completed.
+- Dashboard rendering tested locally.
+- RAM++ baseline image recognition tested successfully.
+- Fresh installation and full end-to-end reproducibility
+  remain to be verified.
 
-Results describe individual investigated images and recorded
-evaluation conditions, not dataset-wide accuracy or certified robustness.
+## Scientific Limitations
 
-## Remaining backend dependencies
+Single-image evaluation results must not be interpreted
+as dataset-wide accuracy or certified model robustness.
 
-- orchestrator/engine.py
-- orchestrator/ram_attacks.py
-- model/ram_adapter.py
-- evaluation/ram_metrics.py
+## Integration
 
-The locally tested implementation uses these modules.
-RAM++ runtime infrastructure and pretrained weights
-must be configured separately.
-
-Existing shared modules and teammate branches must
-remain unchanged during integration.
+This contribution is maintained on an isolated feature
+branch. Shared modules and existing teammate branches
+have not been modified by the publishing workflow.
