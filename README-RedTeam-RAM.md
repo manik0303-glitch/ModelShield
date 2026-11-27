@@ -28,3 +28,17 @@ require compatibility review before standalone execution.
 
 Results describe individual investigated images and recorded
 evaluation conditions, not dataset-wide accuracy or certified robustness.
+
+## Remaining backend dependencies
+
+- orchestrator/engine.py
+- orchestrator/ram_attacks.py
+- model/ram_adapter.py
+- evaluation/ram_metrics.py
+
+The locally tested implementation uses these modules.
+RAM++ runtime infrastructure and pretrained weights
+must be configured separately.
+
+Existing shared modules and teammate branches must
+remain unchanged during integration.
