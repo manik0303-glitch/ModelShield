@@ -42,8 +42,12 @@ from evaluation.semantic_consistency import (
     _normalize_tags,
     compare_tag_sets,
 )
+from evaluation.ground_truth import evaluate_benchmark_quality
 
 _normalize_tag_set = _normalize_tags
+
+# Sentinel: GT quality is computed only when the dataset name contains this token.
+_BENCHMARK_DATASET_TOKEN = "Benchmark"
 
 
 def ensure_benchmark_dataset(
@@ -208,11 +212,26 @@ def evaluate_ram_model_live(
     progress_callback: Optional[Callable[[str, float], None]] = None,
     model_load_time_ms: Optional[float] = None,
     num_latency_repetitions: int = 3,
+    compute_gt_quality: bool = False,
 ) -> Tuple[EvaluationSnapshot, Dict[str, Any]]:
     """
     Evaluates a live RAM++ vision-language model across a dataset of images,
     measuring clean tag predictions, adversarial tag retention, Jaccard similarity,
     tag loss/injection rates, latency (with warm-up and median reporting), and trust checks.
+
+    Ground-Truth Quality Metrics (Category C):
+        When ``compute_gt_quality=True`` OR the ``dataset_name`` contains the word
+        "Benchmark", Precision/Recall/F1 against class-level CIFAR-10 annotations
+        are computed for the built-in 8-image benchmark.  The result is stored in
+        ``raw_results["gt_quality"]`` and the aggregate metrics are added to the
+        returned ``EvaluationSnapshot.metrics`` dict under the keys:
+            mean_precision_vs_gt, mean_recall_vs_gt, mean_f1_vs_gt,
+            subject_recall_rate (%), n_images_with_gt
+        These metrics are ``None`` / absent when GT is unavailable (user uploads).
+
+    Note: GT metrics are NOT added to SUPPORTED_METRICS in regression_gate.py
+    because they are dataset-specific and cannot be compared cross-model without
+    identical ground-truth annotations.
     """
     target_device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(target_device).eval()
@@ -347,6 +366,20 @@ def evaluate_ram_model_live(
     if progress_callback:
         progress_callback("Computing aggregate RAM++ metrics and running trust checks...", 0.9)
 
+    # Ground-Truth Quality (Category C) ─────────────────────────────────────
+    # Available only when evaluating the built-in CIFAR-10 benchmark dataset.
+    _want_gt = compute_gt_quality or (_BENCHMARK_DATASET_TOKEN in dataset_name)
+    gt_quality: Dict[str, Any] = {}
+    if _want_gt:
+        # Build {filename: [tag, ...]} map using the image names from dataset_images
+        image_name_to_tags: Dict[str, List[str]] = {
+            img_name: clean_tag_records[i]
+            for i, (img_name, _) in enumerate(dataset_images)
+        }
+        gt_quality = evaluate_benchmark_quality(image_name_to_tags)
+    agg_gt = gt_quality.get("aggregate", {})
+    has_ground_truth = bool(gt_quality and agg_gt.get("n_images_with_gt", 0) > 0)
+
     # Aggregate Metrics
     mean_jaccard = float(sum(jaccard_scores) / len(jaccard_scores))
     mean_retention = float(sum(retention_rates) / len(retention_rates))
@@ -397,6 +430,7 @@ def evaluate_ram_model_live(
         "adversarial_evaluated": evaluate_adversarial,
         "mean_latency_ms": round(mean_latency, 2),
         "median_latency_ms": round(median_latency, 2),
+        "has_ground_truth": has_ground_truth,
     }
     if model_load_time_ms is not None:
         extra_meta["model_load_time_ms"] = round(float(model_load_time_ms), 2)
@@ -425,6 +459,13 @@ def evaluate_ram_model_live(
         "semantic_consistency": round(semantic_consistency, 2),
         "mean_latency_ms": round(median_latency, 2),
     }
+    # Category C — Ground-truth quality metrics (benchmark only, not for regression gate comparison)
+    if has_ground_truth:
+        metrics["mean_precision_vs_gt"] = round(agg_gt.get("mean_precision") or 0.0, 4)
+        metrics["mean_recall_vs_gt"] = round(agg_gt.get("mean_recall") or 0.0, 4)
+        metrics["mean_f1_vs_gt"] = round(agg_gt.get("mean_f1") or 0.0, 4)
+        metrics["subject_recall_rate"] = round(agg_gt.get("subject_recall_rate") or 0.0, 2)
+        metrics["n_images_with_gt"] = int(agg_gt.get("n_images_with_gt") or 0)
 
     clean_trust_flag = {
         "status": str(trust_flag.get("status", "UNKNOWN")),
@@ -449,6 +490,7 @@ def evaluate_ram_model_live(
         "median_latency_ms": median_latency,
         "jaccard_scores": jaccard_scores,
         "retention_rates": retention_rates,
+        "gt_quality": gt_quality,
     }
     if model_load_time_ms is not None:
         raw_results["model_load_time_ms"] = float(model_load_time_ms)

@@ -43,10 +43,15 @@ class MetricStatus(str, Enum):
 class TaskType(str, Enum):
     CLASSIFICATION = "classification"
     IMAGE_TAGGING = "image_tagging"
+    RAM_TAGGING = "ram_tagging"
 
 
 DEFAULT_TASK_TYPE = TaskType.CLASSIFICATION.value
-SUPPORTED_TASK_TYPES = {TaskType.CLASSIFICATION.value, TaskType.IMAGE_TAGGING.value}
+SUPPORTED_TASK_TYPES = {
+    TaskType.CLASSIFICATION.value,
+    TaskType.IMAGE_TAGGING.value,
+    TaskType.RAM_TAGGING.value,
+}
 
 CLASSIFICATION_METRICS = {
     "clean_accuracy": MetricDirection.HIGHER_IS_BETTER,
@@ -67,6 +72,15 @@ IMAGE_TAGGING_METRICS = {
     "tag_retention_rate": MetricDirection.HIGHER_IS_BETTER,
     "tag_drop_rate": MetricDirection.LOWER_IS_BETTER,
     "tag_injection_rate": MetricDirection.LOWER_IS_BETTER,
+    # RAM++ Multi-Label & Semantic Consistency Metrics
+    "tag_agreement_rate": MetricDirection.HIGHER_IS_BETTER,
+    "mean_jaccard_similarity": MetricDirection.HIGHER_IS_BETTER,
+    "mean_tag_retention_rate": MetricDirection.HIGHER_IS_BETTER,
+    "avg_tags_detected": MetricDirection.HIGHER_IS_BETTER,
+    "tags_lost_per_image": MetricDirection.LOWER_IS_BETTER,
+    "new_tags_per_image": MetricDirection.LOWER_IS_BETTER,
+    "semantic_consistency": MetricDirection.HIGHER_IS_BETTER,
+    "mean_latency_ms": MetricDirection.LOWER_IS_BETTER,
 }
 
 SUPPORTED_METRICS = {
@@ -88,6 +102,10 @@ ADVERSARIAL_TAGGING_METRIC_KEYS = {
     "tag_retention_rate",
     "tag_drop_rate",
     "tag_injection_rate",
+    "semantic_consistency",
+    "mean_tag_retention_rate",
+    "tags_lost_per_image",
+    "new_tags_per_image",
 }
 
 ADVERSARIAL_METRIC_KEYS = (
@@ -189,6 +207,7 @@ class EvaluationSnapshot:
     trust_flag: Optional[Dict[str, Any]] = None
     gradient_masking: Optional[Dict[str, Any]] = None
     raw_checks: Optional[Dict[str, Any]] = None
+    semantic_consistency: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EvaluationSnapshot:
@@ -205,6 +224,7 @@ class EvaluationSnapshot:
             trust_flag=data.get("trust_flag") if isinstance(data.get("trust_flag"), dict) else None,
             gradient_masking=data.get("gradient_masking") if isinstance(data.get("gradient_masking"), dict) else None,
             raw_checks=data.get("raw_checks") if isinstance(data.get("raw_checks"), dict) else None,
+            semantic_consistency=data.get("semantic_consistency") if isinstance(data.get("semantic_consistency"), dict) else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -214,6 +234,7 @@ class EvaluationSnapshot:
             "trust_flag": self.trust_flag,
             "gradient_masking": self.gradient_masking,
             "raw_checks": self.raw_checks,
+            "semantic_consistency": self.semantic_consistency,
         }
 
 
@@ -285,6 +306,35 @@ class RegressionThresholds:
     warn_on_inconclusive_masking: bool = True
     epsilon_tolerance: float = 1e-5
 
+    # Semantic consistency tolerances (RAM++)
+    enable_semantic_consistency: bool = False
+    min_semantic_consistency: float = 60.0
+    warn_semantic_consistency: float = 75.0
+    max_semantic_consistency_drop: float = 10.0
+    warn_semantic_consistency_drop: float = 5.0
+
+    # RAM++ Multi-Label & Agreement Tolerances
+    max_jaccard_drop: float = 5.0
+    warn_jaccard_drop: float = 2.0
+
+    max_agreement_drop: float = 5.0
+    warn_agreement_drop: float = 2.0
+
+    max_retention_drop: float = 5.0
+    warn_retention_drop: float = 2.0
+
+    max_tags_lost_increase: float = 2.0
+    warn_tags_lost_increase: float = 1.0
+
+    max_new_tags_increase: float = 2.0
+    warn_new_tags_increase: float = 1.0
+
+    max_latency_increase: float = 100.0
+    warn_latency_increase: float = 40.0
+
+    max_avg_tags_drop: float = 3.0
+    warn_avg_tags_drop: float = 1.0
+
 
 @dataclass
 class MetricDelta:
@@ -327,6 +377,7 @@ class RegressionGateResult:
     candidate_metadata: Dict[str, Any] = field(default_factory=dict)
     trust_flag_assessment: Optional[Dict[str, Any]] = None
     gradient_masking_assessment: Optional[Dict[str, Any]] = None
+    semantic_consistency_assessment: Optional[Dict[str, Any]] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
@@ -342,6 +393,7 @@ class RegressionGateResult:
             "candidate_metadata": self.candidate_metadata,
             "trust_flag_assessment": self.trust_flag_assessment,
             "gradient_masking_assessment": self.gradient_masking_assessment,
+            "semantic_consistency_assessment": self.semantic_consistency_assessment,
             "timestamp": self.timestamp,
         }
 
@@ -423,9 +475,10 @@ def validate_snapshot_integrity(
         else "classification"
     )
 
-    if task_type == TaskType.IMAGE_TAGGING.value:
-        # 1. Require clean_map for image tagging
-        if "clean_map" not in metrics:
+    if task_type in (TaskType.IMAGE_TAGGING.value, TaskType.RAM_TAGGING.value, "tagging"):
+        # 1. Require clean_map or primary RAM++ metric
+        primary_tagging_keys = {"clean_map", "mean_jaccard_similarity", "tag_agreement_rate", "semantic_consistency"}
+        if not any(k in metrics for k in primary_tagging_keys):
             errors.append(f"{role_name} snapshot is missing mandatory 'clean_map' metric.")
 
         # 2. Require at least one adversarial tagging metric
@@ -450,6 +503,7 @@ def validate_snapshot_integrity(
             )
 
     # 3. Validate every metric value
+    NON_PERCENTAGE_METRICS = {"mean_latency_ms", "avg_tags_detected", "tags_lost_per_image", "new_tags_per_image"}
     for key, value in metrics.items():
         if value is None:
             errors.append(f"{role_name} metric '{key}' has value None.")
@@ -462,11 +516,15 @@ def validate_snapshot_integrity(
         if math.isnan(value) or math.isinf(value):
             errors.append(f"{role_name} metric '{key}' has invalid non-finite value: {value}.")
             continue
-        # Accuracy & ASR must be within percentage range [0.0, 100.0]
-        if value < 0.0 or value > 100.0:
-            errors.append(
-                f"{role_name} metric '{key}' is out of valid percentage range [0.0, 100.0]: {value}."
-            )
+        # Non-percentage metrics must be non-negative; percentage metrics in [0.0, 100.0]
+        if key in NON_PERCENTAGE_METRICS:
+            if value < 0.0:
+                errors.append(f"{role_name} metric '{key}' must be non-negative: {value}.")
+        else:
+            if value < 0.0 or value > 100.0:
+                errors.append(
+                    f"{role_name} metric '{key}' is out of valid percentage range [0.0, 100.0]: {value}."
+                )
 
     if errors:
         return False, errors, snapshot_obj
@@ -491,7 +549,8 @@ def validate_evaluation_conditions(
 
     b_task = (base_meta.task_type or "classification").strip().lower()
     c_task = (cand_meta.task_type or "classification").strip().lower()
-    matched_task = b_task == c_task
+    tagging_aliases = {"image_tagging", "ram_tagging", "tagging"}
+    matched_task = (b_task == c_task) or (b_task in tagging_aliases and c_task in tagging_aliases)
 
     audit: Dict[str, Any] = {
         "task_type": {
@@ -682,6 +741,15 @@ def compute_metric_deltas(
         "tag_retention_rate": (thresholds.warn_tag_retention_drop, thresholds.max_tag_retention_drop),
         "tag_drop_rate": (thresholds.warn_tag_drop_rate_increase, thresholds.max_tag_drop_rate_increase),
         "tag_injection_rate": (thresholds.warn_tag_injection_rate_increase, thresholds.max_tag_injection_rate_increase),
+        # RAM++ Multi-Label & Agreement Metrics
+        "tag_agreement_rate": (thresholds.warn_agreement_drop, thresholds.max_agreement_drop),
+        "mean_jaccard_similarity": (thresholds.warn_jaccard_drop, thresholds.max_jaccard_drop),
+        "mean_tag_retention_rate": (thresholds.warn_retention_drop, thresholds.max_retention_drop),
+        "avg_tags_detected": (thresholds.warn_avg_tags_drop, thresholds.max_avg_tags_drop),
+        "tags_lost_per_image": (thresholds.warn_tags_lost_increase, thresholds.max_tags_lost_increase),
+        "new_tags_per_image": (thresholds.warn_new_tags_increase, thresholds.max_new_tags_increase),
+        "semantic_consistency": (thresholds.warn_semantic_consistency_drop, thresholds.max_semantic_consistency_drop),
+        "mean_latency_ms": (thresholds.warn_latency_increase, thresholds.max_latency_increase),
     }
 
     mutual_keys = [k for k in SUPPORTED_METRICS if k in baseline_metrics and k in candidate_metrics]
@@ -692,50 +760,51 @@ def compute_metric_deltas(
         delta = c_val - b_val
         direction = SUPPORTED_METRICS[key]
         warn_th, max_th = threshold_map.get(key, (1.0, 3.0))
+        unit = "ms" if "latency" in key else (" tags" if "tags" in key and "rate" not in key else "%")
 
         if direction == MetricDirection.HIGHER_IS_BETTER:
             drop = -delta
             if drop > max_th:
                 status = MetricStatus.FAIL
                 reason = (
-                    f"{key} dropped by {drop:.2f}% (from {b_val:.2f}% to {c_val:.2f}%), "
-                    f"exceeding max allowable drop of {max_th:.2f}%."
+                    f"{key} dropped by {drop:.2f}{unit} (from {b_val:.2f}{unit} to {c_val:.2f}{unit}), "
+                    f"exceeding max allowable drop of {max_th:.2f}{unit}."
                 )
                 failures.append(reason)
             elif drop > warn_th:
                 status = MetricStatus.WARN
                 reason = (
-                    f"{key} dropped by {drop:.2f}% (from {b_val:.2f}% to {c_val:.2f}%), "
-                    f"exceeding warning threshold of {warn_th:.2f}%."
+                    f"{key} dropped by {drop:.2f}{unit} (from {b_val:.2f}{unit} to {c_val:.2f}{unit}), "
+                    f"exceeding warning threshold of {warn_th:.2f}{unit}."
                 )
                 warnings.append(reason)
             else:
                 status = MetricStatus.OK
-                change_str = f"+{delta:.2f}%" if delta >= 0 else f"{delta:.2f}%"
+                change_str = f"+{delta:.2f}{unit}" if delta >= 0 else f"{delta:.2f}{unit}"
                 reason = f"{key} shifted by {change_str} (within allowable limits)."
-                passed.append(f"{key}: {b_val:.2f}% -> {c_val:.2f}% (delta {change_str})")
+                passed.append(f"{key}: {b_val:.2f}{unit} -> {c_val:.2f}{unit} (delta {change_str})")
 
         else:
             increase = delta
             if increase > max_th:
                 status = MetricStatus.FAIL
                 reason = (
-                    f"{key} increased by +{increase:.2f}% (from {b_val:.2f}% to {c_val:.2f}%), "
-                    f"exceeding max allowable surge of +{max_th:.2f}%."
+                    f"{key} increased by +{increase:.2f}{unit} (from {b_val:.2f}{unit} to {c_val:.2f}{unit}), "
+                    f"exceeding max allowable surge of +{max_th:.2f}{unit}."
                 )
                 failures.append(reason)
             elif increase > warn_th:
                 status = MetricStatus.WARN
                 reason = (
-                    f"{key} increased by +{increase:.2f}% (from {b_val:.2f}% to {c_val:.2f}%), "
-                    f"exceeding warning threshold of +{warn_th:.2f}%."
+                    f"{key} increased by +{increase:.2f}{unit} (from {b_val:.2f}{unit} to {c_val:.2f}{unit}), "
+                    f"exceeding warning threshold of +{warn_th:.2f}{unit}."
                 )
                 warnings.append(reason)
             else:
                 status = MetricStatus.OK
-                change_str = f"+{delta:.2f}%" if delta >= 0 else f"{delta:.2f}%"
+                change_str = f"+{delta:.2f}{unit}" if delta >= 0 else f"{delta:.2f}{unit}"
                 reason = f"{key} shifted by {change_str} (within allowable limits)."
-                passed.append(f"{key}: {b_val:.2f}% -> {c_val:.2f}% (delta {change_str})")
+                passed.append(f"{key}: {b_val:.2f}{unit} -> {c_val:.2f}{unit} (delta {change_str})")
 
         deltas[key] = MetricDelta(
             metric_name=key,
@@ -928,6 +997,33 @@ def evaluate_regression_gate(
     if cand_snap.gradient_masking and not gm_fail and not gm_warn:
         passed_checks.append("Candidate passed gradient-masking diagnostics (NO_STRONG_SIGNAL).")
 
+    # 4.5. Candidate semantic consistency validation (RAM++)
+    from evaluation.semantic_consistency import evaluate_semantic_regression
+
+    sc_fail, sc_warn, sc_assessment = evaluate_semantic_regression(
+        candidate_result=cand_snap.semantic_consistency,
+        baseline_result=base_snap.semantic_consistency,
+        min_semantic_consistency=thresholds.min_semantic_consistency,
+        warn_semantic_consistency=thresholds.warn_semantic_consistency,
+        max_semantic_consistency_drop=thresholds.max_semantic_consistency_drop,
+        warn_semantic_consistency_drop=thresholds.warn_semantic_consistency_drop,
+        enabled=thresholds.enable_semantic_consistency,
+    )
+    if sc_fail:
+        failures.append(sc_fail)
+    if sc_warn:
+        warnings.append(sc_warn)
+    if (
+        thresholds.enable_semantic_consistency
+        and sc_assessment
+        and not sc_fail
+        and not sc_warn
+        and sc_assessment.get("status") == "PASS"
+    ):
+        passed_checks.append(
+            f"Candidate passed RAM++ semantic consistency check ({sc_assessment.get('candidate_consistency'):.2f}%)."
+        )
+
     # 5. Compute metric deltas
     deltas, m_failures, m_warnings, m_passed = compute_metric_deltas(
         base_snap.metrics, cand_snap.metrics, thresholds
@@ -963,6 +1059,7 @@ def evaluate_regression_gate(
         candidate_metadata=cand_snap.metadata.to_dict(),
         trust_flag_assessment=tc_assessment,
         gradient_masking_assessment=gm_assessment,
+        semantic_consistency_assessment=sc_assessment,
     )
 
 
@@ -1008,10 +1105,11 @@ def export_gate_report_markdown(result: RegressionGateResult) -> str:
     for name, delta in result.metric_deltas.items():
         icon = metric_status_icon.get(delta.status.value, delta.status.value)
         sign = "+" if delta.delta > 0 else ""
-        delta_str = f"{sign}{delta.delta:.2f}%"
-        th_val = delta.fail_threshold if delta.fail_threshold is not None else "N/A"
+        unit = "ms" if "latency" in name else (" tags" if "tags" in name and "rate" not in name else "%")
+        delta_str = f"{sign}{delta.delta:.2f}{unit}"
+        th_val = f"Max {delta.fail_threshold:.1f}{unit}" if delta.fail_threshold is not None else "N/A"
         lines.append(
-            f"| `{name}` | {delta.baseline_value:.2f}% | {delta.candidate_value:.2f}% | {delta_str} | {icon} | Max {th_val}% |"
+            f"| `{name}` | {delta.baseline_value:.2f}{unit} | {delta.candidate_value:.2f}{unit} | {delta_str} | {icon} | {th_val} |"
         )
 
     if result.failures:
@@ -1037,6 +1135,59 @@ def export_gate_report_markdown(result: RegressionGateResult) -> str:
         ])
         for check in result.passed_checks:
             lines.append(f"- {check}")
+
+    if result.semantic_consistency_assessment:
+        sc = result.semantic_consistency_assessment
+        lines.extend([
+            "",
+            "### 🏷️ Semantic Consistency (RAM++)",
+            f"- **Status:** `{sc.get('status', 'N/A')}`",
+            f"- **Summary:** {sc.get('summary', 'N/A')}",
+        ])
+        cand_score = sc.get("candidate_consistency")
+        if cand_score is not None:
+            min_th = sc.get("min_threshold", "N/A")
+            lines.append(f"- **Candidate Consistency:** {cand_score:.2f}% (Min threshold: {min_th}%)")
+        base_score = sc.get("baseline_consistency")
+        if base_score is not None:
+            drop_val = sc.get("consistency_drop", 0.0)
+            lines.append(f"- **Baseline Consistency:** {base_score:.2f}% (Degradation drop: {drop_val:.2f}%)")
+        cand_det = sc.get("candidate_details")
+        if isinstance(cand_det, dict):
+            lines.append(
+                f"- **Tag Overlap:** {len(cand_det.get('overlap_tags', []))} · "
+                f"**Lost Tags:** {cand_det.get('tags_lost_count', 0)} · "
+                f"**New Tags:** {cand_det.get('new_tags_count', 0)}"
+            )
+
+    # ── Metric Category Guide ────────────────────────────────────────────────
+    task_type = result.candidate_metadata.get("task_type", "classification")
+    if "tagging" in task_type or "ram" in task_type:
+        lines.extend([
+            "",
+            "### 📊 Metric Category Reference",
+            "",
+            "| Category | Metrics | What it measures |",
+            "|---|---|---|",
+            "| **A — Intra-model robustness** | `mean_jaccard_similarity`, `mean_tag_retention_rate`, `tag_agreement_rate`, `tags_lost_per_image`, `new_tags_per_image`, `semantic_consistency` | Clean ↔ adversarial tag overlap *within* one model snapshot |",
+            "| **B — Inter-model regression** | Δ of all Category A metrics, `avg_tags_detected`, `mean_latency_ms` | Candidate vs Baseline on the same benchmark (this gate's verdict) |",
+            "| **C — Semantic quality vs GT** | `mean_precision_vs_gt`, `mean_recall_vs_gt`, `mean_f1_vs_gt`, `subject_recall_rate` | Whether the model correctly identifies the primary image subject (benchmark only) |",
+            "",
+            "> **Note:** Category A metrics default to 100 % when `evaluate_adversarial=False`. "
+            "Category C metrics require the built-in CIFAR-10 benchmark dataset and are **not** "
+            "compared cross-model by the regression gate.",
+        ])
+
+    # ── Benchmark Limitation Note ────────────────────────────────────────────
+    num_samples = result.baseline_metadata.get("num_samples", 0)
+    if isinstance(num_samples, int) and 0 < num_samples <= 20:
+        lines.extend([
+            "",
+            "> ⚠️ **Benchmark Limitation:** This evaluation used "
+            f"**{num_samples} image(s)**. Results are indicative only and "
+            "are **not statistically representative** of general model performance. "
+            "Do not make broad quality claims from this dataset.",
+        ])
 
     lines.append("")
     return "\n".join(lines)

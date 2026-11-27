@@ -4,6 +4,47 @@ Semantic Consistency Evaluation Engine for ModelShield using RAM++.
 Evaluates semantic tag retention, tag loss, tag injection, and Jaccard similarity
 between clean and adversarial images using the Recognize Anything Plus Model (RAM++).
 Completely decoupled from UI code for testability and headless execution.
+
+─── METRIC CATEGORY GUIDE ───────────────────────────────────────────────────
+
+There are four distinct categories of RAM++ metrics in ModelShield.
+UI labels, report sections, and threshold names must not mix these categories.
+
+CATEGORY A — Intra-model adversarial robustness  (compare clean ↔ adversarial
+              within ONE model on ONE benchmark run)
+  • mean_jaccard_similarity:    Jaccard(clean_tags, adv_tags) averaged over images.
+  • mean_tag_retention_rate:    |clean ∩ adv| / |clean| × 100% averaged over images.
+  • tag_agreement_rate:         % of images where Jaccard ≥ 50%.
+  • tags_lost_per_image:        mean |clean \ adv| — adversarial noise destroys these.
+  • new_tags_per_image:         mean |adv \ clean| — adversarial noise injects these.
+  • semantic_consistency:       Alias of mean_jaccard_similarity (Jaccard × 100%).
+
+CATEGORY B — Inter-model regression  (compare BASELINE snapshot ↔ CANDIDATE
+              snapshot on the same benchmark; computed by the Regression Gate)
+  • Δ mean_jaccard_similarity:  Candidate robustness minus baseline robustness.
+  • Δ tag_agreement_rate:       Candidate agreement rate minus baseline.
+  • Δ avg_tags_detected:        Candidate clean-tag richness minus baseline.
+  • Δ tags_lost_per_image:      Candidate mean lost minus baseline mean lost.
+  • All Δ metrics: positive means improvement; negative means regression.
+
+CATEGORY C — Semantic prediction quality vs ground truth
+  (requires curated per-image class-level annotations; feasible for the
+   built-in 8-image benchmark because CIFAR-10 class labels are known)
+  • precision_vs_gt:            |predicted ∩ ground_truth| / |predicted|
+  • recall_vs_gt:               |predicted ∩ ground_truth| / |ground_truth|
+  • f1_vs_gt:                   2 × P × R / (P + R)
+  NOTE: Ground-truth here is class-level (what the image MUST contain).
+        RAM++ may predict additional valid scene tags not in the annotation.
+        Low recall means the class-level subject was missed; low precision means
+        hallucinated or irrelevant tags dominate. Neither implies the full
+        prediction is wrong — treat P/R/F1 as subject-level quality indicators only.
+        Do NOT fabricate ground truth for user-uploaded images.
+
+CATEGORY D — Prediction stability (intra-run reproducibility)
+  • Identical inputs to the same model on the same hardware must produce the
+    same tag strings. Verified in the self-consistency regression scenario.
+
+─────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
