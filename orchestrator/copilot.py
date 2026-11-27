@@ -96,7 +96,26 @@ class InvestigationCopilot:
             s_num = int(sample_match.group(1))
             target_sample = next((s for s in detailed_samples if s.get("sample_id") == s_num), None)
             if target_sample:
+                ram_mode = self.run_data.get("ram_mode", False)
                 fooled = target_sample.get("fooled", False)
+                if ram_mode:
+                    return (
+                        f"**RAM++ Investigation Image Dossier:**\n\n"
+                        f"- **Baseline Tags:** `{target_sample.get('clean_class', 'N/A')}`\n"
+                        f"- **After FGSM:** `{target_sample.get('fgsm_class', 'N/A')}` "
+                        f"(tag preservation: {target_sample.get('fgsm_confidence', 0.0):.1f}%, Linf={target_sample.get('fgsm_l_inf', 'N/A')})\n"
+                        f"- **After PGD:** `{target_sample.get('pgd_class', 'N/A')}` "
+                        f"(tag preservation: {target_sample.get('pgd_confidence', 0.0):.1f}%, Linf={target_sample.get('pgd_l_inf', 'N/A')})\n"
+                        f"- **Status:** {'💥 TAGS SUPPRESSED BY ADVERSARIAL PERTURBATION' if fooled else '✅ TAG PROFILE RESILIENT UNDER TESTED PERTURBATIONS'}\n\n"
+                        f"**Gradient Vulnerability Analysis:**\n"
+                        f"RAM++ recognized `{target_sample.get('clean_class', 'N/A')}` on the unperturbed image. "
+                        + (
+                            f"Under adversarial perturbation, these semantic tags were suppressed, indicating "
+                            f"that the tagging head's internal score activations are sensitive to L∞-bounded noise."
+                            if fooled
+                            else f"The tag score margins were sufficiently wide to resist the ε={config.get('epsilon', 8/255):.4f} perturbation."
+                        )
+                    )
                 return (
                     f"**Technical Dossier for Sample {s_num}:**\n\n"
                     f"- **Ground Truth:** `{target_sample.get('true_class')}`\n"
@@ -114,7 +133,33 @@ class InvestigationCopilot:
                 )
 
         # Question 0b: Class-wise vulnerability & flip analysis
-        if "class" in q or "weakness" in q or "worst class" in q or "most vulnerable" in q:
+        # For RAM++ mode, class_metrics will be empty; show tag-based summary instead.
+        if "class" in q or "weakness" in q or "worst class" in q or "most vulnerable" in q or "tag" in q:
+            ram_mode = self.run_data.get("ram_mode", False)
+            if ram_mode:
+                # RAM++ tag suppression summary
+                fgsm_step = next((s for s in steps if s.get("action_type") == "RUN_FGSM"), None)
+                pgd_step = next((s for s in steps if s.get("action_type") == "ESCALATE_PGD"), None)
+                baseline_tags = self.run_data.get("sample_inspection", {}).get("baseline_tags", [])
+                fgsm_tags = self.run_data.get("sample_inspection", {}).get("fgsm_tags", [])
+                pgd_tags = self.run_data.get("sample_inspection", {}).get("pgd_tags", [])
+                fgsm_pres = fgsm_step["metrics"].get("tag_preservation_rate", "N/A") if fgsm_step else "N/A"
+                pgd_pres = pgd_step["metrics"].get("tag_preservation_rate", "N/A") if pgd_step else "N/A"
+                disappeared = [t for t in baseline_tags if t not in pgd_tags] if pgd_tags else []
+                return (
+                    f"**RAM++ Tag Suppression Analysis:**\n\n"
+                    f"- **Baseline tags detected:** {len(baseline_tags)} tags\n"
+                    f"- **After FGSM:** tag preservation = `{fgsm_pres:.2%}` ({len(fgsm_tags)} tags remain)\n" if isinstance(fgsm_pres, float) else
+                    f"- **After FGSM:** tag preservation = `{fgsm_pres}` \n"
+                    + (
+                        f"- **After PGD:** tag preservation = `{pgd_pres:.2%}` ({len(pgd_tags)} tags remain)\n" if isinstance(pgd_pres, float) else
+                        f"- **After PGD:** tag preservation = `{pgd_pres}`\n"
+                    )
+                    + (f"- **Most suppressed tags:** {', '.join(disappeared[:10])}\n" if disappeared else "")
+                    + "\nTag suppression measures how many of RAM++'s recognized semantic concepts "
+                    "are eliminated by imperceptible perturbations. High suppression rates indicate "
+                    "vulnerability in the model's tagging head."
+                )
             if class_metrics:
                 sorted_classes = sorted(
                     class_metrics.items(),
@@ -238,19 +283,24 @@ class InvestigationCopilot:
             return "Defense evaluation has not been conducted in this run."
 
         # Generic grounded fallback
+        ram_mode = self.run_data.get("ram_mode", False)
+        clean_label = "Baseline Tag Count" if ram_mode else "Clean Accuracy"
+        clean_val = assessment.get("clean_accuracy", "N/A")
+        adv_label = "Worst Tag Preservation (%)" if ram_mode else "Worst Adversarial Accuracy"
         return (
             f"**Investigation Summary based on Run `{self.run_data.get('run_id')}`:**\n\n"
             f"- Model: `{self.run_data.get('model_name')}`\n"
+            f"- Mode: `{'RAM++ Multi-label Tagging' if ram_mode else 'CIFAR-10 Classification'}`\n"
             f"- Status: **{assessment.get('overall_status', 'IN_PROGRESS')}**\n"
-            f"- Clean Accuracy: `{assessment.get('clean_accuracy', 'N/A')}%`\n"
-            f"- Worst Adversarial Accuracy: `{assessment.get('worst_adversarial_accuracy', 'N/A')}%`\n"
+            f"- {clean_label}: `{clean_val}`\n"
+            f"- {adv_label}: `{assessment.get('worst_adversarial_accuracy', 'N/A')}`\n"
             f"- Peak ASR: `{assessment.get('max_attack_success_rate', 'N/A')}%`\n"
             f"- Steps Completed: `{len(self.run_data.get('completed_actions', []))}` of `{config.get('max_budget', 'N/A')}`\n\n"
             f"You can ask me specific questions like:\n"
             f"- *'Why did the orchestrator choose PGD?'*\n"
-            f"- *'What does this decrease in adversarial accuracy mean?'*\n"
-            f"- *'What is the difference between attack success rate and adversarial accuracy?'*\n"
-            f"- *'What has not been tested yet?'*\n"
-            f"- *'What limitations should I mention when presenting this result?'*"
+            f"- *'What does the tag preservation rate mean?'*\n"
+            f"- *'What attack vectors have not been tested?'*\n"
+            f"- *'What limitations should I mention when presenting this result?'*\n"
+            f"- *'What is the difference between attack success rate and tag preservation?'*"
         )
 
