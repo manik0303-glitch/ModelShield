@@ -50,12 +50,26 @@ from evaluation.live_eval import (
     run_live_regression_pipeline,
     load_cifar10_samples,
 )
-from model.ram_loader import load_ram_model, load_ram_candidate_model
+from model.ram_loader import (
+    load_ram_model,
+    load_ram_original_model,
+    load_ram_candidate_model,
+    DEFAULT_RAM_CHECKPOINT,
+)
 from evaluation.ram_eval import (
+    SimulatedDegradedRAMWrapper,
     ensure_benchmark_dataset,
     load_dataset_images,
     evaluate_ram_model_live,
     run_live_ram_regression_pipeline,
+)
+from evaluation.ram_gate_visuals import (
+    inject_cyber_lab_css,
+    render_model_identity_panels,
+    render_execution_pipeline,
+    render_security_verdict_panel,
+    render_comparative_analytics,
+    render_tag_impact_and_forensics,
 )
 
 
@@ -756,6 +770,7 @@ def _render_cifar_regression_gate(device: torch.device):
 
 
 def _render_ram_regression_gate(device: torch.device):
+    inject_cyber_lab_css()
     tab_live, tab_manual = st.tabs([
         "🚀 Live Model Evaluation",
         "📁 Snapshot Comparison & JSON Upload",
@@ -767,9 +782,15 @@ def _render_ram_regression_gate(device: torch.device):
     with tab_live:
         st.subheader("Live Model Upload & Genuine Robustness Evaluation")
         st.write(
-            "Upload a new RAM++-compatible PyTorch checkpoint (.pt or .pth) to automatically evaluate it on a standardized "
+            "Evaluate **RAM++ (`ram_plus`)** or original **RAM (`ram`)** checkpoints on a standardized "
             "image suite alongside the official RAM++ baseline. Generates standardized evaluation snapshots and computes "
             "authoritative regression verdicts across multi-label semantic metrics without manual JSON creation."
+        )
+
+        render_execution_pipeline(
+            gate_result=st.session_state.get("gate_ram_result"),
+            has_baseline=st.session_state.get("gate_ram_baseline_snapshot") is not None,
+            has_candidate=st.session_state.get("gate_ram_candidate_snapshot") is not None,
         )
 
         st.markdown("---")
@@ -790,6 +811,8 @@ def _render_ram_regression_gate(device: torch.device):
 
             baseline_model_loaded = None
             baseline_name_resolved = "RAMPlus_SwinLarge_Official"
+            baseline_arch_resolved = "ram_plus_swin_large"
+            baseline_ckpt_resolved = "ram_plus_swin_large_14m.pth"
 
             if base_option == "Pretrained RAM++ Swin-Large (Official Baseline)":
                 ram_pth = "pretrained/ram_plus_swin_large_14m.pth"
@@ -797,7 +820,7 @@ def _render_ram_regression_gate(device: torch.device):
                     st.success("✅ Baseline checkpoint found on disk (`pretrained/ram_plus_swin_large_14m.pth`, 174.5M params).")
                 else:
                     st.warning("⚠️ Baseline checkpoint file not found at `pretrained/ram_plus_swin_large_14m.pth`.")
-                st.caption("Architecture: RAM++ Swin-Large (ram_plus) · Input Resolution: 384×384 · Multi-Label Tagging")
+                st.caption("Architecture: RAM++ (`ram_plus`) · Backbone: Swin-Large · Input: 384×384 · Multi-Label Tagging")
 
             elif base_option == "Reuse Active / Saved Baseline Snapshot":
                 saved_base = st.session_state.get("gate_ram_baseline_snapshot")
@@ -818,65 +841,124 @@ def _render_ram_regression_gate(device: torch.device):
                 )
                 if base_upload is not None:
                     baseline_name_resolved = st.text_input("Baseline Model Name", value=Path(base_upload.name).stem, key="ram_live_base_name_input")
+                    baseline_ckpt_resolved = base_upload.name
                     try:
                         base_bytes = base_upload.getvalue()
-                        baseline_model_loaded, base_dev = load_ram_candidate_model(
+                        baseline_model_loaded, _, base_dev, base_info = load_ram_candidate_model(
                             io.BytesIO(base_bytes),
                             device=str(device),
+                            architecture="ram_plus",
                         )
-                        st.success(f"✅ Custom baseline checkpoint verified on {base_dev}.")
+                        st.success(f"✅ Custom baseline checkpoint verified ({base_info.get('architecture')}) on {base_dev}.")
                     except Exception as exc:
                         st.error(f"Failed to load baseline checkpoint: {exc}")
 
         # STAGE 2: UPLOAD CANDIDATE
         with col_st2:
             st.markdown("#### Stage 2 – Upload Candidate Model")
-            cand_mode = st.radio(
-                "Candidate Model Source",
+            cand_arch_choice = st.selectbox(
+                "Candidate Architecture",
                 [
-                    "Upload Custom RAM++ Checkpoint (.pt / .pth)",
-                    "Baseline as Candidate (Self-Consistency / Quick Demo)",
+                    "RAM++ (ram_plus · Swin-Large)",
+                    "RAM (ram · Swin-Large) — Coming Soon",
                 ],
-                key="ram_live_cand_mode",
+                index=0,
+                key="ram_live_cand_arch",
+                help="RAM++ (ram_plus) is active. Original RAM (ram) architecture support is ready and marked Coming Soon while checkpoint download is paused.",
             )
+            is_orig_ram_coming_soon = "Coming Soon" in cand_arch_choice
+            cand_arch_key = "ram" if is_orig_ram_coming_soon else "ram_plus"
+            candidate_arch_resolved = "ram_swin_large" if is_orig_ram_coming_soon else "ram_plus_swin_large"
 
             candidate_model_loaded = None
-            candidate_name_resolved = "RAMPlus_Candidate"
+            candidate_name_resolved = "RAMPlus_SelfConsistency_Candidate"
+            candidate_ckpt_resolved = "ram_plus_swin_large_14m.pth"
+            cand_mode = "Baseline as Candidate (Self-Consistency — PASS Demo)"
 
-            if cand_mode == "Upload Custom RAM++ Checkpoint (.pt / .pth)":
-                cand_upload = st.file_uploader(
-                    "Upload Candidate RAM++ Checkpoint (.pt, .pth)",
-                    type=["pt", "pth"],
-                    key="ram_live_candidate_upload",
-                    help="Upload fine-tuned or pruned RAM++ weights (.pt or .pth). Must match Swin-Large backbone architecture.",
+            if is_orig_ram_coming_soon:
+                st.info(
+                    "🚧 **Original RAM (`ram` · Swin-Large) — Coming Soon**\n\n"
+                    "Architecture-ready loader (`load_ram_original_model`) is preserved in `model/ram_loader.py`, "
+                    "and `ram_swin_large_14m.pth` download is paused. Switch back to **RAM++ (`ram_plus`)** above to run evaluations."
+                )
+            else:
+                cand_modes = [
+                    "Baseline as Candidate (Self-Consistency — PASS Demo)",
+                    "Simulated Moderate Degradation (25% Tag Drop — Controlled WARN Demo)",
+                    "Simulated Severe Degradation (75% Tag Drop — Controlled FAIL Demo)",
+                    "Upload Custom RAM++ Checkpoint (.pt / .pth)",
+                ]
+
+                cand_mode = st.radio(
+                    "Candidate Model Source",
+                    cand_modes,
+                    index=0,
+                    key="ram_live_cand_mode",
                 )
 
-                if cand_upload is not None:
-                    cand_bytes = cand_upload.getvalue()
+                if cand_mode == "Upload Custom RAM++ Checkpoint (.pt / .pth)":
+                    cand_upload = st.file_uploader(
+                        "Upload Candidate RAM++ Checkpoint (.pt, .pth)",
+                        type=["pt", "pth"],
+                        key="ram_live_candidate_upload",
+                        help="Upload RAM++ (ram_plus) weights (.pt or .pth) with Swin-Large backbone.",
+                    )
+
+                    if cand_upload is not None:
+                        cand_bytes = cand_upload.getvalue()
+                        candidate_ckpt_resolved = cand_upload.name
+                        candidate_name_resolved = st.text_input(
+                            "Candidate Model Name",
+                            value=Path(cand_upload.name).stem,
+                            key="ram_live_cand_name_input",
+                        )
+                        st.caption("Architecture: RAM++ (`ram_plus`) · Backbone: Swin-Large · Input: 384×384")
+                        try:
+                            candidate_model_loaded, _, cand_dev, cand_info = load_ram_candidate_model(
+                                io.BytesIO(cand_bytes),
+                                device=str(device),
+                                architecture="ram_plus",
+                            )
+                            st.success(f"✅ Candidate verified: {cand_info.get('architecture')} on {cand_dev}.")
+                        except Exception as exc:
+                            candidate_model_loaded = None
+                            st.error(f"❌ Candidate verification failed: {exc}")
+                    else:
+                        st.info("Upload a candidate RAM++ PyTorch checkpoint (.pt, .pth) to evaluate.")
+
+                elif cand_mode == "Simulated Moderate Degradation (25% Tag Drop — Controlled WARN Demo)":
                     candidate_name_resolved = st.text_input(
                         "Candidate Model Name",
-                        value=Path(cand_upload.name).stem,
-                        key="ram_live_cand_name_input",
+                        value="RAMPlus_Simulated_25pct_Drop_Demo",
+                        key="ram_live_cand_warn_name_input",
                     )
-                    st.caption("Architecture: RAM++ Swin-Large (ram_plus) · Input Resolution: 384×384")
-                    try:
-                        candidate_model_loaded, cand_dev = load_ram_candidate_model(
-                            io.BytesIO(cand_bytes),
-                            device=str(device),
-                        )
-                        st.success(f"✅ Candidate verified: RAM++ Swin-Large compatible, running on {cand_dev}.")
-                    except Exception as exc:
-                        candidate_model_loaded = None
-                        st.error(f"❌ Candidate verification failed: {exc}")
+                    candidate_ckpt_resolved = "ram_plus_swin_large_14m.pth (simulated 25% tag drop)"
+                    st.warning(
+                        "⚠️ **Controlled Demonstration (Not a Real Trained Model):** "
+                        "Wraps official RAM++ with `SimulatedDegradedRAMWrapper(drop_fraction=0.25)` "
+                        "to demonstrate a moderate regression (WARN)."
+                    )
+
+                elif cand_mode == "Simulated Severe Degradation (75% Tag Drop — Controlled FAIL Demo)":
+                    candidate_name_resolved = st.text_input(
+                        "Candidate Model Name",
+                        value="RAMPlus_Simulated_75pct_Drop_Demo",
+                        key="ram_live_cand_fail_name_input",
+                    )
+                    candidate_ckpt_resolved = "ram_plus_swin_large_14m.pth (simulated 75% tag drop)"
+                    st.warning(
+                        "⚠️ **Controlled Demonstration (Not a Real Trained Model):** "
+                        "Wraps official RAM++ with `SimulatedDegradedRAMWrapper(drop_fraction=0.75)` "
+                        "to demonstrate a severe regression (FAIL)."
+                    )
+
                 else:
-                    st.info("Upload a candidate RAM++ PyTorch checkpoint (.pt, .pth) to evaluate.")
-            else:
-                candidate_name_resolved = st.text_input(
-                    "Candidate Model Name",
-                    value="RAMPlus_SelfConsistency_Candidate",
-                    key="ram_live_cand_demo_name_input",
-                )
-                st.info("ℹ️ Running self-consistency demo: evaluates the official baseline model as candidate to verify gate pass conditions.")
+                    candidate_name_resolved = st.text_input(
+                        "Candidate Model Name",
+                        value="RAMPlus_SelfConsistency_Candidate",
+                        key="ram_live_cand_demo_name_input",
+                    )
+                    st.info("ℹ️ Self-consistency check: evaluates the official RAM++ baseline against itself to verify PASS conditions.")
 
         # STAGE 3: CONFIGURE EVALUATION
         st.markdown("---")
@@ -916,7 +998,14 @@ def _render_ram_regression_gate(device: torch.device):
         st.markdown("---")
         st.markdown("#### Stage 4 – Run Live Evaluation")
 
-        can_execute_live = (cand_mode == "Baseline as Candidate (Self-Consistency / Quick Demo)") or (candidate_model_loaded is not None)
+        can_execute_live = (not is_orig_ram_coming_soon) and (
+            cand_mode in (
+                "Baseline as Candidate (Self-Consistency — PASS Demo)",
+                "Simulated Moderate Degradation (25% Tag Drop — Controlled WARN Demo)",
+                "Simulated Severe Degradation (75% Tag Drop — Controlled FAIL Demo)",
+            )
+            or (candidate_model_loaded is not None)
+        )
 
         if st.button("🚀 Evaluate RAM++ Models & Run Security Gate", type="primary", key="ram_btn_run_live_eval", disabled=not can_execute_live):
             progress_bar = st.progress(0.0)
@@ -958,6 +1047,7 @@ def _render_ram_regression_gate(device: torch.device):
                 # 2. Resolve baseline model
                 b_model = None
                 ram_preprocess = None
+                ram_device = device
                 existing_snap = None
                 if base_option == "Reuse Active / Saved Baseline Snapshot":
                     existing_snap = st.session_state.get("gate_ram_baseline_snapshot")
@@ -969,15 +1059,25 @@ def _render_ram_regression_gate(device: torch.device):
                         raise ValueError("Custom baseline model checkpoint was not loaded successfully.")
                 else:
                     update_progress("Loading official RAM++ Swin-Large baseline model...", 0.15)
-                    b_model, ram_preprocess, _ = load_ram_model(device=str(device))
+                    b_model, ram_preprocess, ram_device = load_ram_model()
 
                 # 3. Resolve candidate model
                 c_model = candidate_model_loaded
-                if cand_mode == "Baseline as Candidate (Self-Consistency / Quick Demo)":
+                if cand_mode == "Baseline as Candidate (Self-Consistency — PASS Demo)":
                     if b_model is not None:
                         c_model = b_model
                     else:
-                        c_model, ram_preprocess, _ = load_ram_model(device=str(device))
+                        c_model, ram_preprocess, ram_device = load_ram_model()
+                elif cand_mode == "Simulated Moderate Degradation (25% Tag Drop — Controlled WARN Demo)":
+                    base_ref = b_model
+                    if base_ref is None:
+                        base_ref, ram_preprocess, ram_device = load_ram_model()
+                    c_model = SimulatedDegradedRAMWrapper(base_ref, drop_fraction=0.25, seed=42)
+                elif cand_mode == "Simulated Severe Degradation (75% Tag Drop — Controlled FAIL Demo)":
+                    base_ref = b_model
+                    if base_ref is None:
+                        base_ref, ram_preprocess, ram_device = load_ram_model()
+                    c_model = SimulatedDegradedRAMWrapper(base_ref, drop_fraction=0.75, seed=42)
                 if c_model is None:
                     raise ValueError("Candidate model could not be loaded.")
 
@@ -1003,7 +1103,8 @@ def _render_ram_regression_gate(device: torch.device):
                     max_semantic_consistency_drop=float(st.session_state.get("ram_th_drop_semantic", 10.0)),
                 )
 
-                # 5. Execute live RAM++ regression pipeline
+                # 5. Execute live RAM/RAM++ regression pipeline
+                forensic_out: dict = {}
                 b_snap, c_snap, gate_res = run_live_ram_regression_pipeline(
                     baseline_model=b_model,
                     candidate_model=c_model,
@@ -1015,13 +1116,19 @@ def _render_ram_regression_gate(device: torch.device):
                     dataset_name=dataset_label,
                     epsilon=float(live_epsilon),
                     thresholds=thresholds,
-                    device=str(device),
+                    device=ram_device,
                     progress_callback=update_progress,
+                    baseline_architecture=baseline_arch_resolved,
+                    candidate_architecture=candidate_arch_resolved,
+                    baseline_checkpoint_name=baseline_ckpt_resolved,
+                    candidate_checkpoint_name=candidate_ckpt_resolved,
+                    forensic_out=forensic_out,
                 )
 
                 st.session_state["gate_ram_baseline_snapshot"] = b_snap
                 st.session_state["gate_ram_candidate_snapshot"] = c_snap
                 st.session_state["gate_ram_result"] = gate_res
+                st.session_state["gate_ram_forensics"] = forensic_out
                 st.session_state["gate_baseline_snapshot"] = b_snap
                 st.session_state["gate_candidate_snapshot"] = c_snap
                 st.session_state["gate_result"] = gate_res
@@ -1355,13 +1462,15 @@ def _render_ram_regression_gate(device: torch.device):
     # STAGE 5: COMPARE RESULTS
     res: RegressionGateResult | None = st.session_state.get("gate_ram_result")
     if res is not None:
-        st.markdown("### Stage 5 – Regression Comparison Results")
-        if res.verdict == GateVerdict.PASS:
-            st.success(f"### {res.verdict.value} ✅\n\n{res.summary}")
-        elif res.verdict == GateVerdict.WARN:
-            st.warning(f"### {res.verdict.value} ⚠️\n\n{res.summary}")
-        else:
-            st.error(f"### {res.verdict.value} ❌\n\n{res.summary}")
+        st.markdown("### Stage 5 – Security Investigation & Regression Results")
+        render_execution_pipeline(gate_result=res)
+        render_model_identity_panels(res.baseline_metadata, res.candidate_metadata)
+        render_security_verdict_panel(res)
+
+        if base_snap_curr is not None and cand_snap_curr is not None:
+            render_comparative_analytics(res, base_snap_curr, cand_snap_curr)
+
+        render_tag_impact_and_forensics(st.session_state.get("gate_ram_forensics"))
 
         st.subheader("Comparative Metric Analysis")
         if res.metric_deltas:

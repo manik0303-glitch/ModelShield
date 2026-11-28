@@ -6,12 +6,14 @@ import streamlit as st
 
 try:
     import ram
-    from ram.models import ram_plus
+    from ram.models import ram as ram_original, ram_plus
 except ImportError:
     ram = None
+    ram_original = None
     ram_plus = None
 
 DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "pretrained" / "ram_plus_swin_large_14m.pth"
+DEFAULT_RAM_CHECKPOINT = Path(__file__).resolve().parent.parent / "pretrained" / "ram_swin_large_14m.pth"
 
 
 @st.cache_resource
@@ -53,6 +55,49 @@ def load_ram_model(checkpoint_path: str | Path | None = None):
     return model, ram.get_transform(image_size=384), device
 
 
+@st.cache_resource
+def load_ram_original_model(checkpoint_path: str | Path | None = None):
+    """
+    Loads and caches the official pretrained original RAM (Recognize Anything Model)
+    using ``ram.models.ram()`` with Swin-Large backbone.
+    Detects CUDA and falls back to CPU on out-of-memory errors.
+    """
+    ckpt = Path(checkpoint_path) if checkpoint_path else DEFAULT_RAM_CHECKPOINT
+    if ram_original is None:
+        raise ImportError("RAM package is not installed. Please activate .venv-ram311 to run RAM.")
+    if not ckpt.is_file():
+        raise FileNotFoundError(
+            f"Original RAM checkpoint missing: {ckpt}. "
+            "Download ram_swin_large_14m.pth or upload a RAM checkpoint."
+        )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    try:
+        model = ram_original(
+            pretrained=str(ckpt),
+            vit="swin_l",
+            image_size=384,
+            stage="eval",
+        )
+        model = model.to(device).eval()
+    except torch.cuda.OutOfMemoryError:
+        if device.type != "cuda":
+            raise
+        del model
+        torch.cuda.empty_cache()
+        device = torch.device("cpu")
+        model = ram_original(
+            pretrained=str(ckpt),
+            vit="swin_l",
+            image_size=384,
+            stage="eval",
+        )
+        model = model.to(device).eval()
+
+    return model, ram.get_transform(image_size=384), device
+
+
 def validate_ram_state_dict(state_dict: dict) -> Tuple[bool, str]:
     """
     Validates whether a state dictionary is structurally compatible with RAM++ (Swin-Large).
@@ -76,13 +121,27 @@ def validate_ram_state_dict(state_dict: dict) -> Tuple[bool, str]:
 
 def load_ram_candidate_model(
     checkpoint_source: str | Path | io.BytesIO | Any,
-    device: torch.device | None = None,
+    device: torch.device | str | None = None,
+    architecture: str = "ram_plus",
 ):
     """
-    Safely loads a custom RAM++ candidate model from a file path or in-memory BytesIO buffer.
-    Validates state dict compatibility and verifies forward inference.
+    Safely loads a custom RAM++ or original RAM candidate model from a file path
+    or in-memory BytesIO buffer. Validates state dict compatibility and verifies
+    forward inference.
+
+    Args:
+        checkpoint_source: Path or file-like buffer containing the checkpoint.
+        device: Optional target device.
+        architecture: ``"ram_plus"`` (RAM++) or ``"ram"`` (original RAM).
     """
-    target_device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if isinstance(device, str):
+        target_device = torch.device(device)
+    else:
+        target_device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    arch_norm = str(architecture or "ram_plus").strip().lower()
+    if arch_norm not in ("ram_plus", "ram"):
+        raise ValueError(f"Unsupported RAM architecture '{architecture}'. Expected 'ram_plus' or 'ram'.")
 
     if isinstance(checkpoint_source, (str, Path)):
         p = Path(checkpoint_source)
@@ -106,12 +165,12 @@ def load_ram_candidate_model(
     if not is_valid:
         raise ValueError(f"Incompatible candidate checkpoint: {reason}")
 
-    if ram_plus is None:
-        raise ImportError("RAM++ package is not installed. Please activate .venv-ram311 to run RAM++.")
+    if ram_plus is None or ram_original is None:
+        raise ImportError("RAM++ package is not installed. Please activate .venv-ram311 to run RAM/RAM++.")
 
-    # Instantiate RAM++ Swin-L architecture
-    # Use the official checkpoint path for architectural instantiation, then load state_dict
-    model = ram_plus(
+    # Instantiate the requested architecture (RAM++ uses ram_plus(), original RAM uses ram())
+    constructor = ram_original if arch_norm == "ram" else ram_plus
+    model = constructor(
         pretrained="",
         vit="swin_l",
         image_size=384,
@@ -141,8 +200,12 @@ def load_ram_candidate_model(
             raise RuntimeError(f"Candidate forward pass verification failed: {exc}")
 
     param_count = sum(p.numel() for p in model.parameters())
+    arch_label = "RAM (ram)" if arch_norm == "ram" else "RAM++ (ram_plus)"
     info = {
         "total_parameters": param_count,
+        "architecture": arch_label,
+        "architecture_id": "ram_swin_large" if arch_norm == "ram" else "ram_plus_swin_large",
+        "backbone": "Swin-Large",
         "device": str(target_device),
         "status": "Validated",
     }

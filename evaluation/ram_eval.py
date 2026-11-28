@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import math
 import os
+import random
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -48,6 +49,56 @@ _normalize_tag_set = _normalize_tags
 
 # Sentinel: GT quality is computed only when the dataset name contains this token.
 _BENCHMARK_DATASET_TOKEN = "Benchmark"
+
+
+class SimulatedDegradedRAMWrapper(torch.nn.Module):
+    """
+    Controlled demonstration wrapper that deterministically drops a fraction of
+    predicted English tags at inference time (via ``generate_tag``).
+
+    IMPORTANT: This is a controlled output-filtering simulation for Regression Gate
+    validation and demonstrations — NOT a separately trained or fine-tuned model.
+    """
+
+    def __init__(self, model: torch.nn.Module, drop_fraction: float = 0.25, seed: int = 42):
+        super().__init__()
+        if not (0.0 <= float(drop_fraction) <= 1.0):
+            raise ValueError(f"drop_fraction must be in [0.0, 1.0], got {drop_fraction}")
+        self.model = model
+        self.drop_fraction = float(drop_fraction)
+        self.seed = int(seed)
+        self._call_counter = 0
+
+    def _drop_tags(self, tag_string: str) -> str:
+        if not tag_string or not tag_string.strip() or self.drop_fraction == 0.0:
+            return tag_string
+        tags = [t.strip() for t in tag_string.split("|") if t.strip()]
+        if not tags:
+            return tag_string
+        rng = random.Random(self.seed)
+        n_keep = max(0, round(len(tags) * (1.0 - self.drop_fraction)))
+        kept = rng.sample(tags, n_keep) if n_keep < len(tags) else tags
+        return " | ".join(kept)
+
+    def generate_tag(self, image: torch.Tensor):
+        en_tags, cn_tags = self.model.generate_tag(image)
+        self._call_counter += 1
+        degraded_en = [self._drop_tags(t) for t in en_tags]
+        return degraded_en, cn_tags
+
+    def forward(self, x: torch.Tensor):
+        return self.model(x)
+
+    def to(self, *args, **kwargs):
+        self.model = self.model.to(*args, **kwargs)
+        return self
+
+    def eval(self):
+        self.model.eval()
+        return self
+
+    def parameters(self, recurse: bool = True):
+        return self.model.parameters(recurse=recurse)
 
 
 def ensure_benchmark_dataset(
@@ -213,6 +264,9 @@ def evaluate_ram_model_live(
     model_load_time_ms: Optional[float] = None,
     num_latency_repetitions: int = 3,
     compute_gt_quality: bool = False,
+    architecture: str = "ram_plus_swin_large",
+    backbone: str = "Swin-Large",
+    checkpoint_name: Optional[str] = None,
 ) -> Tuple[EvaluationSnapshot, Dict[str, Any]]:
     """
     Evaluates a live RAM++ vision-language model across a dataset of images,
@@ -260,6 +314,7 @@ def evaluate_ram_model_live(
     retention_rates: List[float] = []
     tags_lost_list: List[int] = []
     new_tags_list: List[int] = []
+    per_image_records: List[Dict[str, Any]] = []
 
     clean_tensors_sample = None
     adv_tensors_sample = None
@@ -357,11 +412,39 @@ def evaluate_ram_model_live(
             retention_rates.append(retention)
             tags_lost_list.append(len(lost))
             new_tags_list.append(len(new))
+            diff_tensor = (adv_pixel_tensor - raw_pixel_tensor).abs()
+            per_image_records.append({
+                "image_name": img_name,
+                "clean_tags": c_tags,
+                "adv_tags": a_tags,
+                "overlap_tags": sorted(overlap),
+                "lost_tags": sorted(lost),
+                "new_tags": sorted(new),
+                "jaccard": round(jaccard * 100.0, 2),
+                "retention": round(retention, 2),
+                "latency_ms": round(median_img_latency, 2),
+                "adversarial_evaluated": True,
+                "perturbation_linf": round(float(diff_tensor.max().item()), 6),
+                "perturbation_l2": round(float(diff_tensor.pow(2).sum().sqrt().item()), 4),
+                "perturbation_mean_abs": round(float(diff_tensor.mean().item()), 6),
+            })
         else:
             jaccard_scores.append(100.0)
             retention_rates.append(100.0)
             tags_lost_list.append(0)
             new_tags_list.append(0)
+            per_image_records.append({
+                "image_name": img_name,
+                "clean_tags": c_tags,
+                "adv_tags": c_tags,
+                "overlap_tags": sorted(c_tags),
+                "lost_tags": [],
+                "new_tags": [],
+                "jaccard": 100.0,
+                "retention": 100.0,
+                "latency_ms": round(median_img_latency, 2),
+                "adversarial_evaluated": False,
+            })
 
     if progress_callback:
         progress_callback("Computing aggregate RAM++ metrics and running trust checks...", 0.9)
@@ -426,12 +509,29 @@ def evaluate_ram_model_live(
 
     trust_flag = generate_trust_flag(checks)
 
+    try:
+        param_count = int(sum(p.numel() for p in model.parameters()))
+        if param_count <= 1:
+            param_count = None
+    except Exception:
+        param_count = None
+
+    arch_str = str(architecture or "ram_plus_swin_large")
+    is_orig_ram = arch_str.strip().lower() in ("ram", "ram_swin_large")
+
     extra_meta: Dict[str, Any] = {
         "adversarial_evaluated": evaluate_adversarial,
         "mean_latency_ms": round(mean_latency, 2),
         "median_latency_ms": round(median_latency, 2),
         "has_ground_truth": has_ground_truth,
+        "backbone": str(backbone or "Swin-Large"),
+        "device": str(target_device),
+        "architecture_display": "RAM (ram)" if is_orig_ram else "RAM++ (ram_plus)",
     }
+    if checkpoint_name:
+        extra_meta["checkpoint_name"] = str(checkpoint_name)
+    if param_count is not None:
+        extra_meta["total_parameters"] = param_count
     if model_load_time_ms is not None:
         extra_meta["model_load_time_ms"] = round(float(model_load_time_ms), 2)
 
@@ -441,9 +541,9 @@ def evaluate_ram_model_live(
         num_samples=num_samples,
         epsilon=float(epsilon),
         task_type=TaskType.RAM_TAGGING.value,
-        architecture="ram_plus_swin_large",
-        evaluation_protocol="ram_plus_standard",
-        tag_vocabulary_name="ram_plus_tag_list",
+        architecture=arch_str,
+        evaluation_protocol="ram_standard_384",
+        tag_vocabulary_name="ram_4585_tag_list",
         num_tags=4585,
         timestamp=datetime.now(timezone.utc).isoformat(),
         extra=extra_meta,
@@ -491,6 +591,7 @@ def evaluate_ram_model_live(
         "jaccard_scores": jaccard_scores,
         "retention_rates": retention_rates,
         "gt_quality": gt_quality,
+        "per_image": per_image_records,
     }
     if model_load_time_ms is not None:
         raw_results["model_load_time_ms"] = float(model_load_time_ms)
@@ -521,6 +622,11 @@ def run_live_ram_regression_pipeline(
     images: Optional[Any] = None,
     image_names: Optional[Any] = None,
     dataset_name: Optional[str] = None,
+    baseline_architecture: str = "ram_plus_swin_large",
+    candidate_architecture: str = "ram_plus_swin_large",
+    baseline_checkpoint_name: Optional[str] = None,
+    candidate_checkpoint_name: Optional[str] = None,
+    forensic_out: Optional[Dict[str, Any]] = None,
 ) -> Tuple[EvaluationSnapshot, EvaluationSnapshot, RegressionGateResult]:
     """
     Orchestrates the complete live RAM++ model evaluation and regression gate pipeline.
@@ -579,12 +685,13 @@ def run_live_ram_regression_pipeline(
         resolved_ds_name = dataset_name or auto_name
 
     # 1. Baseline Evaluation (or reuse existing)
+    base_raw: Dict[str, Any] = {}
     if existing_baseline_snapshot is not None:
         base_snap = existing_baseline_snapshot
     else:
         if progress_callback:
             progress_callback(f"Evaluating Baseline model ({baseline_name})...", 0.15)
-        base_snap, _ = evaluate_ram_model_live(
+        base_snap, base_raw = evaluate_ram_model_live(
             model=baseline_model,
             preprocess=preprocess,
             model_name=baseline_name,
@@ -594,12 +701,14 @@ def run_live_ram_regression_pipeline(
             evaluate_adversarial=evaluate_adversarial,
             device=target_device,
             progress_callback=progress_callback,
+            architecture=baseline_architecture,
+            checkpoint_name=baseline_checkpoint_name,
         )
 
     # 2. Candidate Evaluation
     if progress_callback:
         progress_callback(f"Evaluating Candidate model ({candidate_name})...", 0.55)
-    cand_snap, _ = evaluate_ram_model_live(
+    cand_snap, cand_raw = evaluate_ram_model_live(
         model=candidate_model,
         preprocess=preprocess,
         model_name=candidate_name,
@@ -609,7 +718,16 @@ def run_live_ram_regression_pipeline(
         evaluate_adversarial=evaluate_adversarial,
         device=target_device,
         progress_callback=progress_callback,
+        architecture=candidate_architecture,
+        checkpoint_name=candidate_checkpoint_name,
     )
+
+    if forensic_out is not None:
+        forensic_out["images"] = resolved_images
+        forensic_out["epsilon"] = float(epsilon)
+        forensic_out["evaluate_adversarial"] = bool(evaluate_adversarial)
+        forensic_out["baseline_per_image"] = base_raw.get("per_image", [])
+        forensic_out["candidate_per_image"] = cand_raw.get("per_image", [])
 
     # 3. Security Regression Gate Decision
     if progress_callback:
