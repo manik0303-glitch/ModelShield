@@ -1,13 +1,13 @@
-from model.load_model import load_model
+from model.load_model import load_ram_plus_model
 
 
 def main():
-    model, weights, device = load_model()
+    model, device, tag_list, _, _ = load_ram_plus_model()
 
     print("Model loaded successfully!")
     print("Model:", model.__class__.__name__)
     print("Device:", device)
-    print("Number of classes:", len(weights.meta["categories"]))
+    print("Tag vocabulary size:", len(tag_list))
 
 
 if __name__ == "__main__":

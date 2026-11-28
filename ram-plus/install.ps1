@@ -35,7 +35,7 @@ try {
     }
     $python = Join-Path $PSScriptRoot '.venv/Scripts/python.exe'
     Invoke-Checked $python @('-m', 'pip', 'install', 'torch', 'torchvision', '--index-url', 'https://download.pytorch.org/whl/cpu')
-    Invoke-Checked $python @('-m', 'pip', 'install', 'transformers==4.28.1', 'fairscale==0.4.13', 'timm==0.4.12', 'scipy', 'Pillow')
+    Invoke-Checked $python @('-m', 'pip', 'install', 'transformers==4.28.1', 'fairscale==0.4.13', 'timm==1.0.9', 'scipy', 'Pillow')
 
     New-Item -ItemType Directory -Path 'pretrained' -Force | Out-Null
     Get-VerifiedFile 'https://huggingface.co/xinyu1205/recognize-anything-plus-model/resolve/main/ram_plus_swin_large_14m.pth' 'pretrained/ram_plus_swin_large_14m.pth' '497C178836BA66698CA226C7895317E6E800034BE986452DBD2593298D50E87D'

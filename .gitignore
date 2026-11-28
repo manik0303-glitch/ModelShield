@@ -18,6 +18,7 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
+installed.cfg
 *.egg
 
 # Virtual Environments
@@ -53,6 +54,7 @@ htmlcov/
 *.ckpt
 data/
 datasets/
+models/
 results/*
 !results/.gitkeep
 

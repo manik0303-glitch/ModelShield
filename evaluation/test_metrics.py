@@ -22,3 +22,35 @@ class TestCleanAccuracy(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "evaluation dataset is empty"):
             evaluate_clean_accuracy(torch.nn.Identity(), loader, torch.device("cpu"))
+
+    def test_multi_label_accuracy_requires_exact_match(self):
+        outputs = torch.tensor(
+            [[2.0, -2.0], [-2.0, 2.0], [2.0, 2.0]]
+        )
+        labels = torch.tensor([[1, 0], [0, 1], [1, 0]])
+        loader = DataLoader(TensorDataset(outputs, labels), batch_size=2)
+
+        accuracy = evaluate_clean_accuracy(
+            torch.nn.Identity(),
+            loader,
+            torch.device("cpu"),
+            multi_label=True,
+            threshold=0.5,
+        )
+
+        self.assertAlmostEqual(accuracy, 200.0 / 3.0)
+
+    def test_multi_label_accuracy_supports_per_tag_thresholds(self):
+        outputs = torch.tensor([[0.1, 0.2], [0.2, 0.3]])
+        labels = torch.tensor([[1, 0], [1, 0]])
+        loader = DataLoader(TensorDataset(outputs, labels), batch_size=2)
+
+        accuracy = evaluate_clean_accuracy(
+            torch.nn.Identity(),
+            loader,
+            torch.device("cpu"),
+            multi_label=True,
+            threshold=torch.tensor([0.5, 0.6]),
+        )
+
+        self.assertEqual(accuracy, 100.0)

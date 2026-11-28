@@ -2,6 +2,8 @@
 
 ModelShield is an AI security testing and adversarial robustness evaluation platform. It automates adversarial red-teaming for machine learning vision models, moving beyond fixed attack scripts by introducing an **Adaptive Decision Engine**, a **Preflight Integrity Validator**, an interactive TryHackMe-inspired **Adaptive Red-Team Mission Lab**, and an **Evidence-Grounded AI Copilot**.
 
+RAM++ is the primary model and dataset path. CIFAR-10/RobustBench remains an explicitly isolated legacy workflow and is not used as a fallback for RAM++.
+
 ---
 
 ## 🏛️ System Architecture
@@ -102,19 +104,21 @@ An interactive technical assistant grounded in real run measurements:
 ## 🛠️ Installation & Setup
 
 ### Prerequisites
-- Python 3.10+
+- Python 3.11
 - PyTorch & Torchvision
 - Streamlit
-- RobustBench: `pip install git+https://github.com/RobustBench/robustbench.git`
+- RAM++ source and pretrained checkpoint (see RAM++ setup below)
 
 ### Install Dependencies
 ```powershell
 pip install -r requirements.txt
 ```
 
-For the optional local CIFAR-10 checkpoint, use a CIFAR-10 ResNet-18
-`state_dict` checkpoint. Serialized model objects are not loaded; checkpoints
-are read in PyTorch's weights-only mode.
+The primary requirements install RAM++ and the ModelShield dashboard. The legacy
+CIFAR-10/RobustBench loader is isolated; install `requirements-cifar.txt` in a
+separate environment if you need that path. For a local CIFAR-10 checkpoint, use a ResNet-18
+`state_dict`; serialized model objects are not loaded. Explicitly pass
+`trust_local_checkpoint=True` only after independently verifying its provenance.
 
 ### RAM++ setup on Windows
 
@@ -165,7 +169,8 @@ python checksetup.py
 ModelShield/
 ├── app.py                         # Streamlit dashboard entry point (5 independent workspaces)
 ├── config.py                      # Global evaluation configuration
-├── requirements.txt               # Project dependencies
+├── requirements.txt               # RAM++ runtime dependencies
+├── requirements-cifar.txt         # Optional isolated legacy CIFAR dependencies
 ├── attacks/
 │   ├── fgsm.py                    # Fast Gradient Sign Method implementation
 │   ├── pgd.py                     # Projected Gradient Descent implementation
@@ -180,8 +185,8 @@ ModelShield/
 │   ├── test_trust_checks.py       # Trust checks unit test
 │   └── test_trust_flag.py         # Trust flag unit test
 ├── model/
-│   ├── dataset.py                 # CIFAR-10 data loader with transforms
-│   ├── load_model.py              # Model loader with verified checkpoint verification
+│   ├── dataset.py                 # RAM++ tagged-data loader; explicit CIFAR helper
+│   ├── load_model.py              # RAM++ primary loader and isolated CIFAR loader
 │   ├── test_fgsm.py               # FGSM evaluation test
 │   ├── test_pgd.py                # PGD evaluation test
 │   └── test_model.py              # Model inference test
