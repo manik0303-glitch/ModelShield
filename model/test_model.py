@@ -1,12 +1,13 @@
 import torch
-from model.load_model import load_model
-from robustbench.data import load_cifar10
+from model.load_model import load_cifar10_model
 
 
 def main():
+    from robustbench.data import load_cifar10
+
     print("Loading RobustBench model...")
 
-    model, device = load_model()
+    model, device = load_cifar10_model()
 
     print("Model loaded successfully!")
     print("Device:", device)

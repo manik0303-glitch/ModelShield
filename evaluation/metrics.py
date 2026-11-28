@@ -1,7 +1,7 @@
 import torch
 
 
-def evaluate_clean_accuracy(model, dataloader, device):
+def evaluate_clean_accuracy(model, dataloader, device, multi_label=False, threshold=0.68):
     correct = 0
     total = 0
 
@@ -13,9 +13,13 @@ def evaluate_clean_accuracy(model, dataloader, device):
             labels = labels.to(device)
 
             outputs = model(images)
-            predictions = outputs.argmax(dim=1)
-
-            correct += (predictions == labels).sum().item()
+            if multi_label:
+                thresh = threshold if not isinstance(threshold, torch.Tensor) else threshold.to(device)
+                predictions = (outputs.sigmoid() > thresh).long()
+                correct += (predictions == labels.long()).all(dim=1).sum().item()
+            else:
+                predictions = outputs.argmax(dim=1)
+                correct += (predictions == labels).sum().item()
             total += labels.size(0)
 
     if total == 0:

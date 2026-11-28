@@ -27,14 +27,18 @@ from typing import Dict, List, Optional, Tuple, Any
 import torch
 from PIL import Image, ImageOps
 
+from config import get_ram_plus_config, get_ram_plus_paths
+
 # ---------------------------------------------------------------------------
 # Path setup — point to the patched upstream RAM++ code
 # ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent.parent  # repo root
-_RAM_ROOT = _HERE / "ram-plus"
+_RAM_PATHS = get_ram_plus_paths()
+_RAM_ROOT = _RAM_PATHS["ram_root"]
 _UPSTREAM = _RAM_ROOT / "upstream"
+if not (_UPSTREAM / "ram").is_dir() and (_RAM_ROOT / "ram").is_dir():
+    _UPSTREAM = _RAM_ROOT
 _PRETRAINED = _RAM_ROOT / "pretrained"
-_CHECKPOINT = _PRETRAINED / "ram_plus_swin_large_14m.pth"
+_CHECKPOINT = _RAM_PATHS["checkpoint_path"]
 
 if str(_UPSTREAM) not in sys.path:
     sys.path.insert(0, str(_UPSTREAM))
@@ -100,12 +104,14 @@ def _load_ram_model():
     """Load and return the RAM++ model (not cached here — use get_ram_model())."""
     from ram.models import ram_plus  # type: ignore
 
+    settings = get_ram_plus_config()
     torch.set_num_threads(min(torch.get_num_threads(), 4))
     model = ram_plus(
         pretrained=str(_CHECKPOINT),
         text_encoder_type=str(_PRETRAINED),
-        image_size=IMAGE_SIZE,
+        image_size=settings["image_size"],
         vit="swin_l",
+        threshold=settings["tag_threshold"],
     )
     model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

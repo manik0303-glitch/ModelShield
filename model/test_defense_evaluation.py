@@ -1,14 +1,14 @@
 import torch
 
-from model.load_model import load_model
-from robustbench.data import load_cifar10
+from model.load_model import load_cifar10_model
 
 from evaluation.defense_evaluation import evaluate_defense
 
 
 def main():
+    from robustbench.data import load_cifar10
 
-    model, device = load_model()
+    model, device = load_cifar10_model()
 
     images, labels = load_cifar10(n_examples=8)
 

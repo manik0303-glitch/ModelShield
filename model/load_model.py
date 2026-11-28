@@ -1,157 +1,217 @@
 import os
 import pickle
+
 import torch
 
-try:
-    from robustbench.utils import load_model as robustbench_load_model
-    _ROBUSTBENCH_AVAILABLE = True
-except ImportError:
-    _ROBUSTBENCH_AVAILABLE = False
+from config import get_ram_plus_config
+from model.ram_adapter import get_ram_model, is_ram_available
+from model.ram_wrapper import RAMPlusWrapper
 
 
 class ModelConfigurationError(RuntimeError):
-    """Raised when the requested evaluation model or verified weights cannot be loaded."""
-    pass
+    """Raised when a requested model or verified weights cannot be loaded."""
 
 
-def load_model(checkpoint_path: str = None):
-    """
-    Load the primary adversarial robustness benchmark model for CIFAR-10.
+def _convert_to_rgb(image):
+    return image.convert("RGB")
 
-    Primary Source: RobustBench Carmon2019Unlabeled (threat_model=Linf).
-    Secondary Source: Verified local CIFAR-10 checkpoint if provided or placed in models/cifar10_model.pt.
 
-    Security Rule:
-        Untrained or randomly initialized models are strictly disallowed for security evaluations.
-        If the primary model cannot be loaded and no verified checkpoint is present,
-        raises ModelConfigurationError with actionable installation instructions.
+def _ram_pixel_transform(image_size):
+    from torchvision import transforms
 
-    Returns:
-        tuple: (model, device)
-    """
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    return transforms.Compose([
+        _convert_to_rgb,
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ])
 
-    def _try_load_checkpoint(path: str):
-        if not os.path.exists(path):
-            return None
-        try:
-            checkpoint = torch.load(path, map_location=device, weights_only=True)
-            model = None
-            metadata = {}
 
-            if isinstance(checkpoint, torch.nn.Module):
-                model = checkpoint
-                metadata = getattr(checkpoint, "model_metadata", {})
-            elif isinstance(checkpoint, dict):
-                state_dict = checkpoint.get("state_dict", checkpoint)
-                if isinstance(state_dict, dict) and len(state_dict) > 0:
-                    import torchvision.models as models
-                    model = models.resnet18(num_classes=10)
-                    model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-                    model.maxpool = torch.nn.Identity()
-                    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-                    if len(missing) > 0:
-                        return None
-                    metadata = checkpoint.get("metadata", {})
+def load_ram_plus_model():
+    """Load the shared RAM++ checkpoint as differentiable tag logits."""
+    try:
+        settings = get_ram_plus_config()
+    except FileNotFoundError as exc:
+        raise ModelConfigurationError(f"RAM++ configuration is unavailable: {exc}") from exc
 
-            if model is not None and isinstance(model, torch.nn.Module):
-                model = model.to(device)
-                model.eval()
+    available, reason = is_ram_available()
+    if not available:
+        raise ModelConfigurationError(f"RAM++ is unavailable: {reason}")
 
-                # Architectural & tensor compatibility probe: forward pass on CIFAR-10 shape (1, 3, 32, 32)
-                test_in = torch.zeros(1, 3, 32, 32, device=device)
-                with torch.no_grad():
-                    test_out = model(test_in)
+    base_model, device = get_ram_model()
+    model = RAMPlusWrapper(base_model, image_size=settings["image_size"]).to(device)
+    model.eval()
 
-                if test_out.ndim != 2 or test_out.shape != (1, 10) or not torch.isfinite(test_out).all():
-                    return None
-
-                # Verify non-trivial weight distribution
-                has_valid_weights = False
-                for param in model.parameters():
-                    if param.numel() > 0 and param.std().item() > 1e-6:
-                        has_valid_weights = True
-                        break
-
-                if not has_valid_weights:
-                    return None
-
-                is_pretrained = metadata.get("is_pretrained", True)
-                arch_name = metadata.get("architecture", getattr(model, "__class__", type(model)).__name__)
-
-                model.model_metadata = {
-                    "architecture": arch_name,
-                    "dataset": "cifar10",
-                    "threat_model": "Linf",
-                    "checkpoint_source": f"Local Verified Checkpoint ({path})",
-                    "is_pretrained": is_pretrained,
-                    "verified_compatible": True,
-                }
-                return model
-        except pickle.UnpicklingError as exc:
-            raise ModelConfigurationError(
-                f"Checkpoint '{path}' could not be loaded in weights-only mode. "
-                "Use a trusted CIFAR-10 ResNet-18 state_dict checkpoint instead "
-                "of a serialized model object."
-            ) from exc
-        except Exception:
-            return None
-        return None
-
-    # 1. If user explicitly specified a checkpoint path, prioritize it
-    if checkpoint_path is not None:
-        model = _try_load_checkpoint(checkpoint_path)
-        if model is not None:
-            return model, device
+    tag_list = base_model.tag_list
+    class_threshold = base_model.class_threshold
+    if tag_list is None or class_threshold is None:
+        raise ModelConfigurationError("RAM++ checkpoint is missing tag vocabulary or thresholds.")
+    if len(tag_list) != class_threshold.numel():
         raise ModelConfigurationError(
-            f"Specified checkpoint '{checkpoint_path}' does not exist or failed architectural verification.\n"
-            f"Security Policy: Only verified pretrained CIFAR-10 checkpoints with non-trivial weights are accepted."
+            "RAM++ tag vocabulary and class thresholds have different lengths."
         )
 
-    # 2. Primary path: RobustBench benchmark model
-    robustbench_error = None
-    if _ROBUSTBENCH_AVAILABLE:
-        try:
-            model = robustbench_load_model(
-                model_name="Carmon2019Unlabeled",
-                dataset="cifar10",
-                threat_model="Linf"
+    transform = _ram_pixel_transform(settings["image_size"])
+    return model, device, tag_list, class_threshold, transform
+
+
+def load_ram_plus_mock_model(image_size=384):
+    """Create the explicit offline diagnostic model; never used as a real-model fallback."""
+    semantic_tag_list = [
+        "dog", "animal", "mammal", "pet", "canine",
+        "outdoor", "grass", "field", "ears", "fur",
+        "standing", "coat", "park", "nature", "ground",
+        "snout", "eyes", "paws", "alert", "tail",
+    ]
+
+    class MockRAMPlus(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.num_class = len(semantic_tag_list)
+            self.tag_list = semantic_tag_list
+            self.class_threshold = torch.ones(self.num_class) * 0.5
+            self.conv = torch.nn.Conv2d(3, 8, kernel_size=16, stride=16)
+            self.head = torch.nn.Linear(8 * 24 * 24, self.num_class)
+            torch.nn.init.normal_(self.conv.weight, mean=0.0, std=0.02)
+            torch.nn.init.normal_(self.head.weight, mean=0.0, std=0.02)
+
+        def forward(self, image):
+            features = torch.relu(self.conv(image))
+            return self.head(features.flatten(1))
+
+    transform = _ram_pixel_transform(image_size)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MockRAMPlus().to(device)
+    model.eval()
+    return model, device, model.tag_list, model.class_threshold, transform
+
+
+def load_model():
+    """Load RAM++ for the primary ModelShield runtime."""
+    return load_ram_plus_model()
+
+
+def _try_load_cifar_checkpoint(path, device):
+    if not os.path.exists(path):
+        return None
+
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=True)
+        model = None
+        metadata = {}
+
+        if isinstance(checkpoint, torch.nn.Module):
+            model = checkpoint
+            metadata = getattr(checkpoint, "model_metadata", {})
+        elif isinstance(checkpoint, dict):
+            state_dict = checkpoint.get("state_dict", checkpoint)
+            if isinstance(state_dict, dict) and state_dict:
+                import torchvision.models as models
+
+                model = models.resnet18(num_classes=10)
+                model.conv1 = torch.nn.Conv2d(
+                    3, 64, kernel_size=3, stride=1, padding=1, bias=False
+                )
+                model.maxpool = torch.nn.Identity()
+                missing, _ = model.load_state_dict(state_dict, strict=False)
+                if missing:
+                    return None
+                metadata = checkpoint.get("metadata", {})
+
+        if not isinstance(model, torch.nn.Module):
+            return None
+
+        model = model.to(device)
+        model.eval()
+        with torch.no_grad():
+            output = model(torch.zeros(1, 3, 32, 32, device=device))
+
+        if output.ndim != 2 or output.shape != (1, 10) or not torch.isfinite(output).all():
+            return None
+
+        if not any(
+            parameter.numel() > 0 and parameter.std().item() > 1e-6
+            for parameter in model.parameters()
+        ):
+            return None
+
+        model.model_metadata = {
+            "architecture": metadata.get(
+                "architecture", model.__class__.__name__
+            ),
+            "dataset": "cifar10",
+            "threat_model": "Linf",
+            "checkpoint_source": f"Local Verified Checkpoint ({path})",
+            "is_pretrained": metadata.get("is_pretrained", False) is True,
+            "verified_compatible": True,
+        }
+        return model
+    except pickle.UnpicklingError as exc:
+        raise ModelConfigurationError(
+            f"Checkpoint '{path}' could not be loaded in weights-only mode. "
+            "Use a trusted CIFAR-10 ResNet-18 state_dict checkpoint instead "
+            "of a serialized model object."
+        ) from exc
+    except (EOFError, KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _load_robustbench_cifar_model():
+    from robustbench.utils import load_model as robustbench_load_model
+
+    return robustbench_load_model(
+        model_name="Carmon2019Unlabeled",
+        dataset="cifar10",
+        threat_model="Linf",
+    )
+
+
+def load_cifar10_model(checkpoint_path=None, *, trust_local_checkpoint=False):
+    """Load the isolated legacy CIFAR-10 RobustBench model."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if checkpoint_path is not None:
+        if not trust_local_checkpoint:
+            raise ModelConfigurationError(
+                "Local CIFAR-10 checkpoints require explicit trust_local_checkpoint=True "
+                "after independently verifying their provenance."
             )
-            model = model.to(device)
-            model.eval()
-
-            # Explicit provenance metadata
-            model.model_metadata = {
-                "architecture": "Carmon2019Unlabeled",
-                "dataset": "cifar10",
-                "threat_model": "Linf",
-                "checkpoint_source": "RobustBench",
-                "is_pretrained": True,
-            }
-            return model, device
-        except Exception as exc:
-            robustbench_error = str(exc)
-    else:
-        robustbench_error = "Package 'robustbench' is not installed in the current environment."
-
-    # 3. Secondary path: Automatic local verified checkpoint discovery
-    for default_path in ["./models/cifar10_model.pt", "./cifar10_model.pt"]:
-        model = _try_load_checkpoint(default_path)
+        model = _try_load_cifar_checkpoint(checkpoint_path, device)
         if model is not None:
+            model.model_metadata["is_pretrained"] = True
+            model.model_metadata["provenance_verified_by_caller"] = True
             return model, device
+        raise ModelConfigurationError(
+            f"Specified checkpoint '{checkpoint_path}' does not exist or failed "
+            "architectural verification. Only compatible pretrained CIFAR-10 "
+            "checkpoints are accepted."
+        )
 
-    # 4. Fail-safe: Refuse to silently substitute an untrained model
+    robustbench_error = None
+    try:
+        model = _load_robustbench_cifar_model()
+        model = model.to(device)
+        model.eval()
+        model.model_metadata = {
+            "architecture": "Carmon2019Unlabeled",
+            "dataset": "cifar10",
+            "threat_model": "Linf",
+            "checkpoint_source": "RobustBench",
+            "is_pretrained": True,
+        }
+        return model, device
+    except ImportError as exc:
+        robustbench_error = str(exc)
+    except (OSError, RuntimeError, ValueError) as exc:
+        robustbench_error = str(exc)
+
     raise ModelConfigurationError(
-        f"Unable to load the primary RobustBench benchmark model 'Carmon2019Unlabeled'.\n"
+        "Unable to load the legacy CIFAR-10 RobustBench model "
+        "'Carmon2019Unlabeled'.\n"
         f"Failure Reason: {robustbench_error}\n\n"
-        f"Security Policy Enforcement:\n"
-        f"ModelShield refuses to silently substitute an untrained or randomly initialized model, "
-        f"as evaluating random weights produces meaningless accuracy and adversarial robustness metrics.\n\n"
-        f"Actionable Resolution:\n"
-        f"1. Install RobustBench in your Python environment:\n"
-        f"   pip install git+https://github.com/RobustBench/robustbench.git\n"
-        f"2. Ensure network connectivity to allow downloading pretrained Carmon2019Unlabeled weights.\n"
-        f"3. Alternatively, place a verified pretrained CIFAR-10 model checkpoint at './models/cifar10_model.pt'."
+        "Security Policy Enforcement:\n"
+        "ModelShield refuses to substitute random weights for CIFAR-10 evaluation.\n\n"
+        "Actionable Resolution:\n"
+        "1. Install the optional CIFAR dependencies from requirements-cifar.txt.\n"
+        "2. Alternatively, provide a locally stored checkpoint only after independently "
+        "verifying its provenance and setting trust_local_checkpoint=True."
     )

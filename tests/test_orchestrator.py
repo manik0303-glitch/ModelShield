@@ -294,21 +294,23 @@ class TestAdaptiveRedTeamOrchestrator(unittest.TestCase):
         self.assertIn("defended_fgsm_accuracy", defense_step.metrics)
         self.assertIn("defended_pgd_accuracy", defense_step.metrics)
 
-    def test_load_model_refuses_untrained_random_fallback(self):
+    def test_cifar_loader_refuses_untrained_random_fallback(self):
         from unittest.mock import patch
-        from model.load_model import load_model, ModelConfigurationError
-        # When RobustBench is missing and no local verified checkpoint exists,
-        # load_model must raise ModelConfigurationError rather than silently returning an untrained model.
-        with patch("model.load_model._ROBUSTBENCH_AVAILABLE", False):
+        from model.load_model import load_cifar10_model, ModelConfigurationError
+        # The isolated CIFAR loader must refuse an untrained fallback.
+        with patch(
+            "model.load_model._load_robustbench_cifar_model",
+            side_effect=ImportError("RobustBench is not installed"),
+        ):
             with self.assertRaises(ModelConfigurationError) as ctx:
-                load_model()
+                load_cifar10_model()
             err_msg = str(ctx.exception)
             self.assertIn("Carmon2019Unlabeled", err_msg)
             self.assertIn("Security Policy Enforcement", err_msg)
-            self.assertIn("pip install", err_msg)
+            self.assertIn("requirements-cifar.txt", err_msg)
 
-    def test_load_model_local_checkpoint_provenance(self):
-        from model.load_model import load_model
+    def test_cifar_loader_local_checkpoint_provenance(self):
+        from model.load_model import load_cifar10_model
         from torchvision.models import resnet18
 
         chkpt_path = os.path.join(self.test_results_dir, "test_cifar_chkpt.pt")
@@ -320,21 +322,27 @@ class TestAdaptiveRedTeamOrchestrator(unittest.TestCase):
             chkpt_path,
         )
 
-        loaded_model, dev = load_model(checkpoint_path=chkpt_path)
+        loaded_model, dev = load_cifar10_model(
+            checkpoint_path=chkpt_path,
+            trust_local_checkpoint=True,
+        )
         self.assertIsNotNone(loaded_model)
         self.assertTrue(hasattr(loaded_model, "model_metadata"))
         self.assertTrue(loaded_model.model_metadata.get("is_pretrained"))
         self.assertIn("Local Verified Checkpoint", loaded_model.model_metadata.get("checkpoint_source", ""))
         self.assertTrue(torch.equal(loaded_model.conv1.weight.cpu(), test_net.conv1.weight))
 
-    def test_load_model_rejects_pickled_model_objects(self):
-        from model.load_model import load_model, ModelConfigurationError
+    def test_cifar_loader_rejects_pickled_model_objects(self):
+        from model.load_model import load_cifar10_model, ModelConfigurationError
 
         chkpt_path = os.path.join(self.test_results_dir, "pickled_model.pt")
         torch.save(SimpleTestModel(), chkpt_path)
 
         with self.assertRaisesRegex(ModelConfigurationError, "weights-only"):
-            load_model(checkpoint_path=chkpt_path)
+            load_cifar10_model(
+                checkpoint_path=chkpt_path,
+                trust_local_checkpoint=True,
+            )
 
     def test_preflight_model_provenance(self):
         # Attach provenance metadata and test preflight records it
