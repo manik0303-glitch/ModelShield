@@ -61,3 +61,11 @@ results/*
 # OS-generated files
 .DS_Store
 Thumbs.db
+
+# Local model weights
+pretrained/
+
+# Local Python environments
+.venv-ram/
+.venv-ram311/
+scratch/

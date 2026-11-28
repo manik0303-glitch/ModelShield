@@ -12,6 +12,7 @@ def evaluate_attack_ensemble(
     pgd_steps=10,
     multi_label=False,
     threshold=0.68,
+    random_start=True,
 ):
     """
     Evaluates clean performance and generates an attack ensemble (FGSM + PGD).
@@ -48,7 +49,7 @@ def evaluate_attack_ensemble(
         epsilon=epsilon,
         alpha=alpha,
         steps=pgd_steps,
-        random_start=True,
+        random_start=random_start,
         multi_label=multi_label,
     )
 

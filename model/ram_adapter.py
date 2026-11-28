@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -115,7 +116,15 @@ def _load_ram_model():
     )
     model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    try:
+        model = model.to(device)
+    except torch.cuda.OutOfMemoryError:
+        if device.type != "cuda":
+            raise
+        warnings.warn("RAM++ exceeded CUDA memory; using CPU instead.", RuntimeWarning)
+        device = torch.device("cpu")
+        model = model.to(device)
+        torch.cuda.empty_cache()
     return model, device
 
 
