@@ -32,6 +32,8 @@ venv.bak/
 .env
 .env.local
 .env.*.local
+.env.*
+!.env.example
 
 # IDEs and Editors
 .vscode/
@@ -41,8 +43,18 @@ venv.bak/
 
 # Testing & Coverage
 .pytest_cache/
+.mypy_cache/
 .coverage
 htmlcov/
+
+# Model assets and generated data
+*.pt
+*.pth
+*.ckpt
+data/
+datasets/
+results/*
+!results/.gitkeep
 
 # OS-generated files
 .DS_Store
