@@ -309,16 +309,32 @@ class TestAdaptiveRedTeamOrchestrator(unittest.TestCase):
 
     def test_load_model_local_checkpoint_provenance(self):
         from model.load_model import load_model
-        # Create a temporary verified checkpoint
+        from torchvision.models import resnet18
+
         chkpt_path = os.path.join(self.test_results_dir, "test_cifar_chkpt.pt")
-        test_net = SimpleTestModel()
-        torch.save(test_net, chkpt_path)
+        test_net = resnet18(num_classes=10)
+        test_net.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        test_net.maxpool = nn.Identity()
+        torch.save(
+            {"state_dict": test_net.state_dict(), "metadata": {"is_pretrained": True}},
+            chkpt_path,
+        )
 
         loaded_model, dev = load_model(checkpoint_path=chkpt_path)
         self.assertIsNotNone(loaded_model)
         self.assertTrue(hasattr(loaded_model, "model_metadata"))
         self.assertTrue(loaded_model.model_metadata.get("is_pretrained"))
         self.assertIn("Local Verified Checkpoint", loaded_model.model_metadata.get("checkpoint_source", ""))
+        self.assertTrue(torch.equal(loaded_model.conv1.weight.cpu(), test_net.conv1.weight))
+
+    def test_load_model_rejects_pickled_model_objects(self):
+        from model.load_model import load_model, ModelConfigurationError
+
+        chkpt_path = os.path.join(self.test_results_dir, "pickled_model.pt")
+        torch.save(SimpleTestModel(), chkpt_path)
+
+        with self.assertRaisesRegex(ModelConfigurationError, "weights-only"):
+            load_model(checkpoint_path=chkpt_path)
 
     def test_preflight_model_provenance(self):
         # Attach provenance metadata and test preflight records it

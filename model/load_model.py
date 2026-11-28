@@ -1,4 +1,5 @@
 import os
+import pickle
 import torch
 
 try:
@@ -36,7 +37,7 @@ def load_model(checkpoint_path: str = None):
         if not os.path.exists(path):
             return None
         try:
-            checkpoint = torch.load(path, map_location=device)
+            checkpoint = torch.load(path, map_location=device, weights_only=True)
             model = None
             metadata = {}
 
@@ -89,6 +90,12 @@ def load_model(checkpoint_path: str = None):
                     "verified_compatible": True,
                 }
                 return model
+        except pickle.UnpicklingError as exc:
+            raise ModelConfigurationError(
+                f"Checkpoint '{path}' could not be loaded in weights-only mode. "
+                "Use a trusted CIFAR-10 ResNet-18 state_dict checkpoint instead "
+                "of a serialized model object."
+            ) from exc
         except Exception:
             return None
         return None

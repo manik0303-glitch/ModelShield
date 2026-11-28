@@ -1,0 +1,5 @@
+/.venv/
+/upstream/
+/pretrained/
+/.cache/
+/__pycache__/

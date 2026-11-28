@@ -112,6 +112,23 @@ An interactive technical assistant grounded in real run measurements:
 pip install -r requirements.txt
 ```
 
+For the optional local CIFAR-10 checkpoint, use a CIFAR-10 ResNet-18
+`state_dict` checkpoint. Serialized model objects are not loaded; checkpoints
+are read in PyTorch's weights-only mode.
+
+### RAM++ setup on Windows
+
+The RAM++ Mission Lab requires Git, Python 3.11, and an approximately 3 GB
+checkpoint download. From the project root, run:
+
+```powershell
+.\ram-plus\install.ps1
+.\ram-plus\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\ram-plus\.venv\Scripts\python.exe -m streamlit run red_team_app.py
+```
+
+See [the RAM++ setup guide](ram-plus/README.md) for details.
+
 ---
 
 ## 🖥️ Running the Application
